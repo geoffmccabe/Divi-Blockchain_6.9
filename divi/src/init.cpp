@@ -864,7 +864,9 @@ bool CheckWalletFileExists(std::string strDataDir)
 {
     std::string strWalletFile = settings.GetArg("-wallet", "wallet.dat");
     // Wallet file must be a plain filename without a directory
-    const std::string expectedWalletFilename = boost::filesystem::basename(strWalletFile) + boost::filesystem::extension(strWalletFile);
+    // boost::filesystem::basename()+extension() were removed in modern Boost;
+    // path::filename() yields the same "stem + extension" filename.
+    const std::string expectedWalletFilename = boost::filesystem::path(strWalletFile).filename().string();
     if (strWalletFile != expectedWalletFilename)
     {
         return InitError(strprintf(translate("Unexpected wallet filename %s"), strWalletFile));
@@ -955,7 +957,6 @@ void PrintInitialLogHeader(bool fDisableWallet, int numberOfFileDescriptors, con
     const int maximumNumberOfConnections = GetMaxConnections();
     LogPrintf("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
     LogPrintf("DIVI version %s (%s)\n", FormatFullVersion(), CLIENT_DATE);
-    LogPrintf("Using OpenSSL version %s\n", SSLeay_version(SSLEAY_VERSION));
     if (!ShouldLogTimestamps()) LogPrintf("Startup time: %s\n", DateTimeStrFormat("%Y-%m-%d %H:%M:%S", GetTime()));
     LogPrintf("Default data directory %s\n", GetDefaultDataDir().string());
     LogPrintf("Using data directory %s\n", dataDirectoryInUse);
