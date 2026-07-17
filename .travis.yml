@@ -1,0 +1,26 @@
+os: linux
+dist: bionic
+language: cpp
+
+services:
+  - docker
+
+before_script:
+  - sudo apt-get update -y
+  - sudo apt install -y libsecret-1-0
+  - sudo apt-get install -y pass gnupg2
+  - gpg2 --verbose --batch --generate-key docker.keydetails
+  - pass init dummy@github.com
+  - wget https://github.com/docker/docker-credential-helpers/releases/download/v0.6.3/docker-credential-pass-v0.6.3-amd64.tar.gz
+  - tar xvzf docker-credential-pass-v0.6.3-amd64.tar.gz
+  - chmod +x docker-credential-pass
+  - sudo mv docker-credential-pass /usr/local/bin
+  - mkdir -p $HOME/.docker
+  - sudo mv docker.config.json $HOME/.docker/config.json
+
+script:
+  # Compile from source
+  - (( ${#DOCKER_TOKEN} == 0 )) || echo "$DOCKER_TOKEN" | docker login -u "$DOCKER_USERNAME" --password-stdin
+  - pushd divi
+  - docker build -t divi -f DockerfileForTests .
+  - docker run --rm -t divi /bin/bash -c "make check"

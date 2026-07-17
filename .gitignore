@@ -1,0 +1,9 @@
+.DS_Store
+.vs
+.vscode/
+*.creator.user
+doxygen/*
+developer_stuff
+documents/*
+doxygen/
+*/divi_regtest/*
