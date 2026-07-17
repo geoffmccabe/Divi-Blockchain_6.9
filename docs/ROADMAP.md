@@ -33,10 +33,16 @@ Added via Divi's existing time‑based ("flag‑day") activation mechanism, whic
 successfully for the August 2023 upgrade. Each is optional and sequenced deliberately —
 every opcode is a permanent addition.
 
-1. **Native NFT type.** Promote the encrypted‑Arweave NFT format (see C2) from an
-   off‑chain convention to a consensus‑recognized script template, so wallets and
-   explorers treat it as first‑class. *(The opcode provides recognition and clarity;
-   the privacy/permanence come from the application design, not the opcode.)*
+1. **Native data-record opcodes — `OP_POE` and `OP_NFD`.** Promote the already-working
+   forkless records (the "DVXP" format) into consensus-recognized, natively-indexed
+   first-class types. `OP_POE` anchors Proof-of-Existence; `OP_NFD` marks
+   Non-Fungible-DIVI ("NFDs", branded **Divi Collectibles** — the encrypted-Arweave
+   format, see C2). Ships with native RPCs (`createpoe`/`verifypoe`/`getpoe`/`listpoe`)
+   and built-in indexing, which is the real convenience for app builders — no external
+   indexer, no `txindex`. *(The opcodes provide recognition, structural validity, and
+   indexing; the privacy/permanence come from the application design, not the opcode.)*
+   Full spec: `docs/SOFTFORK-OPCODES.md` (`OP_POE` specified; `OP_NFD` reserved for the
+   NFD workstream).
 2. **Covenant support (OP_CTV‑style).** Enables clawback vaults and constrained‑spend
    patterns — a capability Bitcoin itself has not yet activated.
 3. **Relative timelocks (CheckSequenceVerify).** Complements the absolute timelocks

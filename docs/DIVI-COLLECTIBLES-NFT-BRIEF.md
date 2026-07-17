@@ -1,4 +1,10 @@
-# Divi Collectibles — encrypted-Arweave NFTs on Divi (build brief)
+# Divi Collectibles (NFDs) — encrypted-Arweave collectibles on Divi (build brief)
+
+**Naming (use consistently everywhere — guides, code, marketing):** these are
+**NFDs** = **Non-Fungible-DIVI**, presented to users as **Divi Collectibles**.
+The consensus opcode is **`OP_NFD`** (reserved in `docs/SOFTFORK-OPCODES.md`; the
+chain workstream named the slot, the internals are yours). Wherever this brief
+says "NFT" or "type 0x02," read it as NFD / OP_NFD.
 
 **Audience:** a fresh Claude Code agent picking this up cold. Read this end to
 end before writing anything. It is self-contained but points at the existing
