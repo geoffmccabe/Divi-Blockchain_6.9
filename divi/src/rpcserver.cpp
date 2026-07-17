@@ -19,7 +19,6 @@
 #include "Settings.h"
 #include <utilmoneystr.h>
 #include <random.h>
-#include <alert.h>
 #include <Warnings.h>
 
 #include <deque>
@@ -184,7 +183,6 @@ std::string GetWarningMessage(std::string category)
 {
     int alertPriorityValue = 0;
     std::pair<std::string,std::string> warningMessages = Warnings::GetWarnings(settings.GetBoolArg("-testsafemode",false),alertPriorityValue);
-    CAlert::GetHighestPriorityWarning(alertPriorityValue, warningMessages.first);
     if (category == "statusbar")
         return translate(warningMessages.first.c_str());
     else if (category == "rpc")

@@ -448,9 +448,6 @@ static bool SetPeerVersionAndServices(CCriticalSection& mainCriticalSection, CNo
         }
     }
 
-    // Relay alerts
-    RelayAllAlertsTo(pfrom);
-
     pfrom->RecordSuccessfullConnection();
 
     string remoteAddr;
@@ -866,28 +863,6 @@ bool static ProcessMessage(CCriticalSection& mainCriticalSection, CNode* pfrom, 
         std::vector<CAddress> vAddr = addrman.GetAddr();
         for(const CAddress& addr: vAddr)
                 pfrom->PushAddress(addr);
-    }
-    else if (strCommand == "alert" && AlertsAreEnabled())
-    {
-        CAlert alert;
-        vRecv >> alert;
-
-        uint256 alertHash = alert.GetHash();
-        if (pfrom->setKnown.count(alertHash) == 0) {
-            if (alert.ProcessAlert(settings)) {
-                // Relay
-                pfrom->setKnown.insert(alertHash);
-                RelayAlertToPeers(alert);
-            } else {
-                // Small DoS penalty so peers that send us lots of
-                // duplicate/expired/invalid-signature/whatever alerts
-                // eventually get banned.
-                // This isn't a Misbehaving(100) (immediate ban) because the
-                // peer might be an older or different implementation with
-                // a different signature key, etc.
-                Misbehaving(pfrom->GetNodeState(), 10, "Unable to process alert message");
-            }
-        }
     }
     else if (!BloomFiltersAreEnabled() &&
              (strCommand == "filterload" ||

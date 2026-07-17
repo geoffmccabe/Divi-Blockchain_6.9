@@ -1521,47 +1521,6 @@ void DeterministicallyRelayAddressToLimitedPeers(const CAddress& addr,int number
         ((*mi).second)->PushAddress(addr);
 }
 
-bool ShouldRelayAlertToPeer(const CAlert& alert, CNode* pnode)
-{
-    if (!alert.IsInEffect())
-        return false;
-    // don't relay to nodes which haven't sent their version message
-    if (pnode->GetVersion() == 0)
-        return false;
-    // returns true if wasn't already contained in the set
-    if (pnode->setKnown.insert(alert.GetHash()).second) {
-        if (alert.AppliesTo(pnode->GetVersion(), pnode->strSubVer) ||
-            alert.AppliesToMe() ||
-            GetAdjustedTime() < alert.nRelayUntil) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void RelayAlertToPeers(const CAlert& alert)
-{
-    LOCK(cs_vNodes);
-    for(CNode* pnode: vNodes)
-    {
-        if(ShouldRelayAlertToPeer(alert,pnode))
-        {
-            pnode->PushMessage("alert", alert);
-        }
-    }
-}
-void RelayAllAlertsTo(CNode* peer)
-{
-    const std::vector<CAlert> allAlerts  = CAlert::GetAllAlerts();
-    for(const CAlert& alert: allAlerts)
-    {
-        if(ShouldRelayAlertToPeer(alert,peer))
-        {
-            peer->PushMessage("alert", alert);
-        }
-    }
-}
-
 bool RepeatRelayedInventory(CNode* pfrom, const CInv& inv)
 {
     LOCK(cs_mapRelay);
@@ -1648,15 +1607,6 @@ static bool Bind(UIMessenger& uiMessenger,const CService& addr, unsigned int fla
     return true;
 }
 
-static bool fAlerts = DEFAULT_ALERTS;
-bool AlertsAreEnabled()
-{
-    return fAlerts;
-}
-void EnableAlertsAccordingToSettings(const Settings& settings)
-{
-    fAlerts = settings.GetBoolArg("-alerts", DEFAULT_ALERTS);
-}
 
 bool SetNumberOfFileDescriptors(UIMessenger& uiMessenger, int& nFD)
 {
@@ -1718,7 +1668,6 @@ void SetNetworkingParameters()
 
     setConnectionTimeoutDuration(settings.GetArg("-timeout", DEFAULT_CONNECT_TIMEOUT));
 
-    EnableAlertsAccordingToSettings(settings);
     if (settings.GetBoolArg("-peerbloomfilters", DEFAULT_PEERBLOOMFILTERS))
         EnableBloomFilters();
 

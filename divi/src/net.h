@@ -27,7 +27,6 @@
 #include <boost/signals2/signal.hpp>
 
 class CAddrMan;
-class CAlert;
 class CBlockIndex;
 class CNode;
 class CInv;
@@ -67,8 +66,6 @@ void RelayInv(CInv& inv);
 
 void NotifyPeersOfNewChainTip(const int chainHeight, const uint256& updatedBlockHashForChainTip, const int fallbackPeerChainHeightEstimate);
 void DeterministicallyRelayAddressToLimitedPeers(const CAddress& addr,int numberOfNodes);
-void RelayAlertToPeers(const CAlert& alert);
-void RelayAllAlertsTo(CNode* peer);
 std::vector<std::string> BanOutdatedPeers();
 bool BanSpecificPeer(const CNetAddr& address);
 int GetPeerCount();
@@ -99,7 +96,6 @@ struct CNodeStateStats {
 void GetNodeStateStats(std::vector<std::pair<CNodeStats,CNodeStateStats>>& vstats);
 
 class UIMessenger;
-bool AlertsAreEnabled();
 bool SetNumberOfFileDescriptors(UIMessenger& uiMessenger, int& nFD);
 void SetNetworkingParameters();
 bool InitializeP2PNetwork(UIMessenger& uiMessenger);

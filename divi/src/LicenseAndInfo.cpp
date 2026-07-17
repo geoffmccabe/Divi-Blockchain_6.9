@@ -58,7 +58,6 @@ std::string HelpMessage(HelpMessageMode mode,const Settings& settings, const CCh
     strUsage += HelpMessageOpt("-?", translate("This help message"));
     strUsage += HelpMessageOpt("-version", translate("Print version and exit"));
     strUsage += HelpMessageOpt("-alertnotify=<cmd>", translate("Execute command when a relevant alert is received or we see a really long fork (%s in cmd is replaced by message)"));
-    strUsage += HelpMessageOpt("-alerts", strprintf(translate("Receive and display P2P network alerts (default: %u)"), DEFAULT_ALERTS));
     strUsage += HelpMessageOpt("-blocknotify=<cmd>", translate("Execute command when the best block changes (%s in cmd is replaced by block hash)"));
     strUsage += HelpMessageOpt("-checkblocks=<n>", strprintf(translate("How many blocks to check at startup (default: %u, 0 = all)"), 500));
     strUsage += HelpMessageOpt("-conf=<file>", strprintf(translate("Specify configuration file (default: %s)"), "divi.conf"));

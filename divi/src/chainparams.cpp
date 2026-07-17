@@ -173,7 +173,6 @@ public:
         pchMessageStart[3] = 0x8f;
         premineAmt = 617222416 * COIN;
 
-        vAlertPubKey = ParseHex("0231c07d17c2d69facd84908434dc402b5a9b9e25e5062d1e65163acc7afd0e3ef");
         nDefaultPort = 51472;
         bnProofOfWorkLimit = ~uint256(0) >> 20;			// DIVI starting difficulty is 1 / 2^12
         nSubsidyHalvingInterval = 60 * 24 * 365;
@@ -282,7 +281,6 @@ public:
         pchMessageStart[3] = 0x8a;
         premineAmt = 2534320700;
 
-        vAlertPubKey = ParseHex("046e70d194b1b6b63b9c5431ea83c7b17d0db8930408b1e7937e41759a799e8fcd22d99ffc0c880094bb07a852a9020f810068417e65d19def8ffbdfa90727b637");
         nDefaultPort = 51472;
         bnProofOfWorkLimit = ~uint256(0) >> 20; // DIVI starting difficulty is 1 / 2^12
         nSubsidyHalvingInterval = 1000;
@@ -389,7 +387,6 @@ public:
         pchMessageStart[3] = 0x78;
         premineAmt = 617222416 * COIN;
 
-        vAlertPubKey = ParseHex("046e70d194b1b6b63b9c5431ea83c7b17d0db8930408b1e7937e41759a799e8fcd22d99ffc0c880094bb07a852a9020f810068417e65d19def8ffbdfa90727b637");
         nDefaultPort = 51474;
         bnProofOfWorkLimit = ~uint256(0) >> 20; // DIVI starting difficulty is 1 / 2^12
         nSubsidyHalvingInterval = 1000;
