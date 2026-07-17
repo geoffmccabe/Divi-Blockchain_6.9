@@ -603,14 +603,14 @@ CWalletDB::BackupStatus CWalletDB::Backup(const std::string& destination)
     LOCK(berkleyDbEnvWrapper_.cs_db);
     if(!Flush()) return BackupStatus::FAILED_DB_IN_USE;
     // Copy wallet.dat
-    filesystem::path pathSrc = GetDataDir() / dbFilename_;
-    filesystem::path pathDest(destination);
-    if (filesystem::is_directory(pathDest))
+    boost::filesystem::path pathSrc = GetDataDir() / dbFilename_;
+    boost::filesystem::path pathDest(destination);
+    if (boost::filesystem::is_directory(pathDest))
         pathDest /= dbFilename_;
 
     try {
 #if BOOST_VERSION >= 158000
-        filesystem::copy_file(pathSrc, pathDest, filesystem::copy_option::overwrite_if_exists);
+        boost::filesystem::copy_file(pathSrc, pathDest, boost::filesystem::copy_options::overwrite_existing);
 #else
         std::ifstream src(pathSrc.string(), std::ios::binary);
         std::ofstream dst(pathDest.string(), std::ios::binary);
@@ -618,7 +618,7 @@ CWalletDB::BackupStatus CWalletDB::Backup(const std::string& destination)
 #endif
         LogPrintf("copied wallet.dat to %s\n", pathDest.string());
         return BackupStatus::SUCCEEDED;
-    } catch (const filesystem::filesystem_error& e) {
+    } catch (const boost::filesystem::filesystem_error& e) {
         LogPrintf("error copying wallet.dat to %s - %s\n", pathDest.string(), e.what());
         return BackupStatus::FAILED_FILESYSTEM_ERROR;
     }

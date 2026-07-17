@@ -28,8 +28,6 @@
  */
 
 #include "crypto/scrypt.h"
-#include "uint256.h"
-#include "utilstrencodings.h"
 #include "crypto/sha256.h"
 #include <string>
 
