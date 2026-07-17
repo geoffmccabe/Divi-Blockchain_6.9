@@ -43,7 +43,7 @@ all heavy data lives on Arweave.
 | content_hash  | 32   | SHA-256 of the **plaintext** (doubles as a PoE)      |
 | flags         | 1    | bit0 encrypted · bits1-3 media class · rest reserved |
 
-70-byte body. The mint tx's owner = the address of the input that funded it
+65-byte body (32+32+1). The mint tx's owner = the address of the input that funded it
 (first mint owner); recorded by the indexer, not spelled out in the body.
 
 ### subtype `0x02` — TRANSFER
