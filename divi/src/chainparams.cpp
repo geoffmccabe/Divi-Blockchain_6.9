@@ -107,14 +107,29 @@ namespace
 const MapCheckpoints mapCheckpoints =
         boost::assign::map_list_of
         (0, uint256("0x00000e258596876664989374c7ee36445cf5f4f80889af415cc32478214394ea"))
-        (100, uint256("0x000000275b2b4a8af2c93ebdfd36ef8dd8c8ec710072bcc388ecbf5d0c8d3f9d"));
+        (100, uint256("0x000000275b2b4a8af2c93ebdfd36ef8dd8c8ec710072bcc388ecbf5d0c8d3f9d"))
+        // Recent checkpoints added 2026-07 from a full genesis->tip re-validation
+        // (the OpenSSL-free build; every hash verified against the canonical chain,
+        // and the pre-existing height-100 checkpoint reproduced exactly).
+        (100000, uint256("0xc8ea29522685a4482e074f6814b72d5478ca7c22e3b8fe5e26e8aab0098f311c"))
+        (300000, uint256("0x00bae6bc67a98ccd90e1cf52ebb5d208333b87a81248c87aba8aa29ac40a48ea"))
+        (600000, uint256("0xab796c1b6ad2342d1fd510237340285c1a118c2eeeee23859891bd2c40fd577a"))
+        (1000000, uint256("0x25f7f482cbf34cd7da9d5db0e3b633c8c0abe54e0de1ef96e97ba15e8713e984"))
+        (1500000, uint256("0x18b3d41e4dcaead3109f8b205c79e9c97009933cd1095f317e480b212cb3a2e2"))
+        (2000000, uint256("0xcf7a7dc8c7c0358479b21be964c8ef1da647e5a2c279d2da140c5cfd50da8ca6"))
+        (2500000, uint256("0x78637a1b47d7e4b7440c1ed5f982babc8c20b471d74c6c94fb2468229153fa31"))
+        (3000000, uint256("0xbefe90339580db60147c0f0b8a5247b8785ce2e780bc1a00918c13cfa916e5c9"))
+        (3500000, uint256("0x3b489a77e97fb801d5a83f620a5911682829a9b63beafb2f1d4a0c09c5333429"))
+        (4000000, uint256("0x8781786ce33d3db2ba502feb98e6cc0df37c2cb4ae180be6eb292cbdffba0e3c"))
+        (4100000, uint256("0xef7850c87ff5fa8f0646305ca83d899578d4388bda0e1c7d1906cccbcafd6706"))
+        (4125000, uint256("0x15e26d65024704c3cc22b6436833e7d06abee6ab7a31839584286632bf2784d0"));
 
 const CCheckpointData data = {
     &mapCheckpoints,
-    1538069980, // * UNIX timestamp of last checkpoint block
-    100,    // * total number of transactions between genesis and last checkpoint
+    1784098358, // * UNIX timestamp of last checkpoint block (height 4125000)
+    9180837,    // * total number of transactions between genesis and last checkpoint
     //   (the tx=... number in the SetBestChain debug.log lines)
-    2000        // * estimated number of transactions per day after checkpoint
+    3000        // * estimated number of transactions per day after checkpoint
 };
 
 const MapCheckpoints mapCheckpointsTestnet =
