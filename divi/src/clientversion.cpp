@@ -11,7 +11,10 @@
 /**
  * Client version number
  */
-#define CLIENT_VERSION_SUFFIX ""
+// Identifies the modernized (OpenSSL-free, native-arm64) fork in `subversion` and
+// `--version`, WITHOUT changing the numeric/consensus version (still 3.0.0.0). The
+// Divi Desktop 6.9 wallet pins this suffix to confirm it is running the fast build.
+#define CLIENT_VERSION_SUFFIX "-dd69.1"
 
 
 /**
