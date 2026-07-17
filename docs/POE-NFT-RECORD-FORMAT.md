@@ -37,10 +37,33 @@ Body: Arweave tx-id pointer + content integrity hash + owner reference. The same
 content hash doubles as a PoE record, so an NFT mint *is* a timestamp. Spec TBD
 in the NFT workstream.
 
-### type `0x03` — PoE batch root (reserved, for scale)
-Body: a Merkle root over many document hashes (OpenTimestamps pattern), so one
-on-chain output timestamps unlimited documents. Each document keeps a small
-Merkle-path proof off-chain.
+### type `0x03` — PoE batch root (for scale)
+| field    | size | meaning                       |
+|----------|------|-------------------------------|
+| hashAlg  | 1    | `0x01` = SHA-256              |
+| root     | 32   | Merkle root over many document hashes |
+
+Total 39 bytes — identical size to a single PoE record, but it timestamps an
+unlimited number of documents at once. Each document keeps a small **audit path**
+(its siblings up to the root) off-chain; anyone recomputes the root from
+`document + path` and checks it against this on-chain record. The block timestamp
+proves the whole batch existed by then.
+
+**Merkle construction — RFC 6962 (Certificate Transparency), not Bitcoin's.**
+```
+leaf hash = SHA-256(0x00 || doc_hash)
+node hash = SHA-256(0x01 || left || right)
+```
+The `0x00`/`0x01` domain separation is deliberate: it blocks the second-preimage
+/ internal-node forgery that plain Bitcoin-style Merkle trees allow
+(CVE-2012-2459, where duplicating trailing nodes yields the same root). Odd
+levels are **promoted**, never duplicated. Split point for a subtree of `n`
+leaves is the largest power of two strictly less than `n`.
+
+Reference + tests: `contrib/poe/poe_batch.py` (`selftest` proves the tree math
+offline over many sizes with tamper checks; `anchor`/`verify` do it on-chain).
+Verified end-to-end on regtest: 5 docs → one anchor → each proves, an outsider
+is rejected.
 
 ## Anchor (create) — reference
 

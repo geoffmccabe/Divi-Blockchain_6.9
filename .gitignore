@@ -7,3 +7,5 @@ developer_stuff
 documents/*
 doxygen/
 */divi_regtest/*
+
+contrib/poe/__pycache__/
