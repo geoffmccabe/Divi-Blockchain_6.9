@@ -6,6 +6,7 @@
 #define BITCOIN_CRYPTER_H
 
 #include "allocators.h"
+#include "crypto/cleanse.h"
 #include "keystore.h"
 #include "serialize.h"
 #include <MasterKey.h>
@@ -57,8 +58,8 @@ public:
 
     void CleanKey()
     {
-        OPENSSL_cleanse(vchKey.data(), vchKey.size());
-        OPENSSL_cleanse(vchIV.data(), vchIV.size());
+        memory_cleanse(vchKey.data(), vchKey.size());
+        memory_cleanse(vchIV.data(), vchIV.size());
         fKeySet = false;
     }
 

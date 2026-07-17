@@ -649,6 +649,8 @@ crypto_libbitcoin_crypto_a_CPPFLAGS = $(BITCOIN_CONFIG_INCLUDES)
 crypto_libbitcoin_crypto_a_SOURCES = \
   crypto/aes.cpp \
   crypto/aes.h \
+  crypto/cleanse.cpp \
+  crypto/cleanse.h \
   crypto/ctaes/ctaes.h \
   crypto/ctaes/ctaes.c \
   crypto/sha1.cpp \

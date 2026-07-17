@@ -25,6 +25,7 @@
 
 #include <openssl/err.h>
 #include <openssl/rand.h>
+#include "crypto/cleanse.h"
 
 static void RandFailure()
 {
@@ -50,7 +51,7 @@ void RandAddSeed()
     // Seed with CPU performance counter
     int64_t nCounter = GetPerformanceCounter();
     RAND_add(&nCounter, sizeof(nCounter), 1.5);
-    OPENSSL_cleanse((void*)&nCounter, sizeof(nCounter));
+    memory_cleanse((void*)&nCounter, sizeof(nCounter));
 }
 
 static void RandAddSeedPerfmon()
@@ -81,7 +82,7 @@ static void RandAddSeedPerfmon()
     RegCloseKey(HKEY_PERFORMANCE_DATA);
     if (ret == ERROR_SUCCESS) {
         RAND_add(vData.data(), nSize, nSize / 100.0);
-        OPENSSL_cleanse(vData.data(), nSize);
+        memory_cleanse(vData.data(), nSize);
         LogPrint("rand", "%s: %lu bytes\n", __func__, nSize);
     } else {
         static bool warned = false; // Warn only once
@@ -149,7 +150,7 @@ void GetStrongRandBytes(unsigned char* out, int num)
     // Produce output
     hasher.Finalize(buf);
     memcpy(out, buf, num);
-    OPENSSL_cleanse(buf, 64);
+    memory_cleanse(buf, 64);
 }
 
 uint64_t GetRand(uint64_t nMax)

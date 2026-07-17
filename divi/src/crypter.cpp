@@ -14,6 +14,7 @@
 #include <boost/foreach.hpp>
 #include <openssl/aes.h>
 #include <openssl/evp.h>
+#include "crypto/cleanse.h"
 #include <string>
 #include <vector>
 #include <boost/foreach.hpp>
@@ -41,7 +42,7 @@ int CCrypter::BytesToKeySHA512AES(const std::vector<unsigned char>& chSalt, cons
 
     memcpy(key, buf, WALLET_CRYPTO_KEY_SIZE);
     memcpy(iv, buf + WALLET_CRYPTO_KEY_SIZE, WALLET_CRYPTO_IV_SIZE);
-    OPENSSL_cleanse(buf, sizeof(buf));
+    memory_cleanse(buf, sizeof(buf));
     return WALLET_CRYPTO_KEY_SIZE;
 }
 
@@ -55,8 +56,8 @@ bool CCrypter::SetKeyFromPassphrase(const SecureString& strKeyData, const std::v
         i = BytesToKeySHA512AES(chSalt, strKeyData, nRounds, vchKey.data(), vchIV.data());
 
     if (i != (int)WALLET_CRYPTO_KEY_SIZE) {
-        OPENSSL_cleanse(vchKey.data(), vchKey.size());
-        OPENSSL_cleanse(vchIV.data(), vchIV.size());
+        memory_cleanse(vchKey.data(), vchKey.size());
+        memory_cleanse(vchIV.data(), vchIV.size());
         return false;
     }
 
