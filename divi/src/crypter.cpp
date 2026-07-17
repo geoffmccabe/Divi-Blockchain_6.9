@@ -12,8 +12,6 @@
 #include "Logging.h"
 
 #include <boost/foreach.hpp>
-#include <openssl/aes.h>
-#include <openssl/evp.h>
 #include "crypto/cleanse.h"
 #include <string>
 #include <vector>

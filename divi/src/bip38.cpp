@@ -8,8 +8,7 @@
 #include "pubkey.h"
 #include "utilstrencodings.h"
 
-#include <openssl/aes.h>
-#include <openssl/sha.h>
+#include "crypto/aes.h"
 #include <secp256k1.h>
 #include <string>
 
@@ -25,9 +24,8 @@
 
 void DecryptAES(uint256 encryptedIn, uint256 decryptionKey, uint256& output)
 {
-    AES_KEY key;
-    AES_set_decrypt_key(decryptionKey.begin(), 256, &key);
-    AES_decrypt(encryptedIn.begin(), output.begin(), &key);
+    // Single-block AES-256 (ECB), in-tree replacement for OpenSSL AES_decrypt.
+    AES256Decrypt(decryptionKey.begin()).Decrypt(output.begin(), encryptedIn.begin());
 }
 
 void ComputePreFactor(std::string strPassphrase, std::string strSalt, uint256& prefactor)
@@ -95,9 +93,9 @@ std::string BIP38_Encrypt(std::string strAddress, std::string strPassphrase, uin
 
     //encrypt part 1
     uint512 encrypted1;
-    AES_KEY key;
-    AES_set_encrypt_key(derivedHalf2.begin(), 256, &key);
-    AES_encrypt(block1.begin(), encrypted1.begin(), &key);
+    // Single-block AES-256 (ECB), in-tree replacement for OpenSSL AES_encrypt.
+    AES256Encrypt aesEnc(derivedHalf2.begin());
+    aesEnc.Encrypt(encrypted1.begin(), block1.begin());
 
     //block2 = (pointb[17...32] xor derivedhalf1[16...31]
     uint256 p2 = privKey >> 128;
@@ -106,7 +104,7 @@ std::string BIP38_Encrypt(std::string strAddress, std::string strPassphrase, uin
 
     //encrypt part 2
     uint512 encrypted2;
-    AES_encrypt(block2.begin(), encrypted2.begin(), &key);
+    aesEnc.Encrypt(encrypted2.begin(), block2.begin());
 
     std::string strPrefix = "0142";
     strPrefix += (fCompressed ? "E0" : "C0");
