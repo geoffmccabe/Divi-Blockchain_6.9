@@ -275,7 +275,6 @@ public:
     std::vector<CAddress> vAddrToSend;
     mruset<CAddress> setAddrKnown;
     bool fGetAddr;
-    std::set<uint256> setKnown;
 
     // inventory based relay
     mruset<CInv> setInventoryKnown;

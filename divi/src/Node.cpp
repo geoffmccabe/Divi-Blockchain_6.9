@@ -562,7 +562,7 @@ CNode::CNode(
     , vAddrToSend()
     , setAddrKnown(5000)
     , fGetAddr(false)
-    , setKnown()
+    
     , setInventoryKnown(MaxSendBufferSize() / 1000)
     , vInventoryToSend()
     , cs_inventory()
