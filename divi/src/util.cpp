@@ -108,7 +108,7 @@ Settings& settings = Settings::instance();
 boost::filesystem::path GetPidFile(const Settings& settings)
 {
     boost::filesystem::path pathPidFile(settings.GetArg("-pid", "divid.pid"));
-    if (!pathPidFile.is_complete()) pathPidFile = GetDataDir() / pathPidFile;
+    if (!pathPidFile.is_absolute()) pathPidFile = GetDataDir() / pathPidFile;
     return pathPidFile;
 }
 

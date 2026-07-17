@@ -34,7 +34,7 @@ namespace
 boost::filesystem::path GetMasternodeConfigFile(const Settings& settings)
 {
     boost::filesystem::path pathConfigFile(settings.GetArg("-mnconf", "masternode.conf"));
-    if (!pathConfigFile.is_complete()) pathConfigFile = GetDataDir() / pathConfigFile;
+    if (!pathConfigFile.is_absolute()) pathConfigFile = GetDataDir() / pathConfigFile;
     return pathConfigFile;
 }
 

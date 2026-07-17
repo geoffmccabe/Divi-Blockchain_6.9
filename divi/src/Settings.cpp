@@ -153,7 +153,7 @@ void CopyableSettings::ParseParameters(int argc, const char* const argv[])
 boost::filesystem::path CopyableSettings::GetConfigFile() const
 {
     boost::filesystem::path pathConfigFile(GetArg("-conf", "divi.conf"));
-    if (!pathConfigFile.is_complete())
+    if (!pathConfigFile.is_absolute())
         pathConfigFile = GetDataDir(false) / pathConfigFile;
 
     return pathConfigFile;

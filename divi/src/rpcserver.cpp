@@ -27,6 +27,7 @@
 #include "json/json_spirit_writer_template.h"
 #include <boost/algorithm/string.hpp>
 #include <boost/asio.hpp>
+#include <boost/asio/deadline_timer.hpp>
 #include <boost/bind.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/foreach.hpp>
@@ -172,10 +173,10 @@ static std::string rpcWarmupStatus("RPC server started");
 static CCriticalSection cs_rpcWarmup;
 
 //! These are created by StartRPCThreads, destroyed in StopRPCThreads
-static asio::io_service* rpc_io_service = NULL;
+static asio::io_context* rpc_io_service = NULL;
 static map<string, boost::shared_ptr<deadline_timer> > deadlineTimers;
 static boost::thread_group* rpc_worker_group = NULL;
-static boost::asio::io_service::work* rpc_dummy_work = NULL;
+static boost::asio::executor_work_guard<boost::asio::io_context::executor_type>* rpc_dummy_work = NULL;
 static std::vector<CSubNet> rpc_allow_subnets; //!< List of subnets to allow RPC connections from
 static std::vector<boost::shared_ptr<ip::tcp::acceptor> > rpc_acceptors;
 
@@ -513,9 +514,11 @@ void ErrorReply(std::ostream& stream, const Object& objError, const Value& id)
 CNetAddr BoostAsioToCNetAddr(boost::asio::ip::address address)
 {
     CNetAddr netaddr;
-    // Make sure that IPv4-compatible and IPv4-mapped IPv6 addresses are treated as IPv4 addresses
-    if (address.is_v6() && (address.to_v6().is_v4_compatible() || address.to_v6().is_v4_mapped()))
-        address = address.to_v6().to_v4();
+    // Make sure IPv4-mapped IPv6 addresses are treated as IPv4 addresses.
+    // (is_v4_compatible() and address_v6::to_v4() were removed in modern Boost;
+    // v4-compatible ::a.b.c.d addresses are deprecated per RFC 4291 and unused.)
+    if (address.is_v6() && address.to_v6().is_v4_mapped())
+        address = boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped, address.to_v6());
 
     if (address.is_v4()) {
         boost::asio::ip::address_v4::bytes_type bytes = address.to_v4().to_bytes();
@@ -581,7 +584,7 @@ static void RPCListen(boost::shared_ptr<basic_socket_acceptor<Protocol> > accept
     boost::shared_ptr<AcceptedConnectionImpl<Protocol> > conn(new AcceptedConnectionImpl<Protocol>());
 
     acceptor->async_accept(
-        *conn->socketStream.rdbuf(),
+        conn->socketStream.rdbuf()->socket(),
         conn->peer,
         boost::bind(&RPCAcceptHandler<Protocol>,
             acceptor,
@@ -625,7 +628,7 @@ static ip::tcp::endpoint ParseEndpoint(const std::string& strEndpoint, int defau
     std::string addr;
     int port = defaultPort;
     SplitHostPort(strEndpoint, port, addr);
-    return ip::tcp::endpoint(asio::ip::address::from_string(addr), port);
+    return ip::tcp::endpoint(asio::ip::make_address(addr), port);
 }
 
 void StartRPCThreads()
@@ -677,7 +680,7 @@ void StartRPCThreads()
     }
 
     assert(rpc_io_service == NULL);
-    rpc_io_service = new asio::io_service();
+    rpc_io_service = new asio::io_context();
 
     std::vector<ip::tcp::endpoint> vEndpoints;
     bool bBindAny = false;
@@ -730,7 +733,7 @@ void StartRPCThreads()
                 v6_only_error);
 
             acceptor->bind(endpoint);
-            acceptor->listen(socket_base::max_connections);
+            acceptor->listen(socket_base::max_listen_connections);
 
             RPCListen(acceptor);
 
@@ -754,19 +757,19 @@ void StartRPCThreads()
 
     rpc_worker_group = new boost::thread_group();
     for (int i = 0; i < settings.GetArg("-rpcthreads", 4); i++)
-        rpc_worker_group->create_thread(boost::bind(&asio::io_service::run, rpc_io_service));
+        rpc_worker_group->create_thread(boost::bind(&asio::io_context::run, rpc_io_service));
     fRPCRunning = true;
 }
 
 void StartDummyRPCThread()
 {
     if (rpc_io_service == NULL) {
-        rpc_io_service = new asio::io_service();
+        rpc_io_service = new asio::io_context();
         /* Create dummy "work" to keep the thread from exiting when no timeouts active,
-         * see http://www.boost.org/doc/libs/1_51_0/doc/html/boost_asio/reference/io_service.html#boost_asio.reference.io_service.stopping_the_io_service_from_running_out_of_work */
-        rpc_dummy_work = new asio::io_service::work(*rpc_io_service);
+         * see http://www.boost.org/doc/libs/1_51_0/doc/html/boost_asio/reference/io_context.html#boost_asio.reference.io_context.stopping_the_io_service_from_running_out_of_work */
+        rpc_dummy_work = new boost::asio::executor_work_guard<boost::asio::io_context::executor_type>(boost::asio::make_work_guard(*rpc_io_service));
         rpc_worker_group = new boost::thread_group();
-        rpc_worker_group->create_thread(boost::bind(&asio::io_service::run, rpc_io_service));
+        rpc_worker_group->create_thread(boost::bind(&asio::io_context::run, rpc_io_service));
         fRPCRunning = true;
     }
 }
@@ -779,7 +782,7 @@ void StopRPCThreads()
 
     // First, cancel all timers and acceptors
     // This is not done automatically by ->stop(), and in some cases the destructor of
-    // asio::io_service can hang if this is skipped.
+    // asio::io_context can hang if this is skipped.
     boost::system::error_code ec;
     BOOST_FOREACH (const boost::shared_ptr<ip::tcp::acceptor>& acceptor, rpc_acceptors) {
         acceptor->cancel(ec);

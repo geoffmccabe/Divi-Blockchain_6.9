@@ -5,6 +5,10 @@
 
 #include "NotificationInterface.h"
 
+// Modern Boost moved the bind placeholders (_1, _2, ...) into boost::placeholders.
+#include <boost/bind/bind.hpp>
+using namespace boost::placeholders;
+
 MainNotificationSignals NotificationInterfaceRegistry::g_signals;
 
 void NotificationInterfaceRegistry::RegisterMainNotificationInterface(NotificationInterface* pwalletIn)
