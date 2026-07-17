@@ -29,7 +29,10 @@
 #include "crypto/sha256.h"
 #include "random.h"
 
-#include <openssl/evp.h>
+#include "crypto/hmac_sha512.h"
+#include "crypto/cleanse.h"
+
+#include <cstring>
 
 SecureString CMnemonic::Generate(int strength)
 {
@@ -148,15 +151,45 @@ bool CMnemonic::Check(SecureString mnemonic)
     return fResult;
 }
 
+// PBKDF2-HMAC-SHA512 using the in-tree HMAC (crypto/hmac_sha512). This matches
+// OpenSSL's PKCS5_PBKDF2_HMAC(..., EVP_sha512()) byte-for-byte -- verified against
+// the official BIP39 seed test vectors -- so existing seed phrases derive exactly
+// the same keys as before.
+static void PBKDF2_HMAC_SHA512(const unsigned char* pass, size_t pass_len,
+                               const unsigned char* salt, size_t salt_len,
+                               unsigned int iterations,
+                               unsigned char* out, size_t dkLen)
+{
+    const size_t H = CHMAC_SHA512::OUTPUT_SIZE;
+    unsigned char U[CHMAC_SHA512::OUTPUT_SIZE];
+    unsigned char T[CHMAC_SHA512::OUTPUT_SIZE];
+    unsigned int blocks = (unsigned int)((dkLen + H - 1) / H);
+    for (unsigned int i = 1; i <= blocks; i++) {
+        unsigned char ibe[4] = { (unsigned char)(i >> 24), (unsigned char)(i >> 16),
+                                 (unsigned char)(i >> 8),  (unsigned char)i };
+        CHMAC_SHA512(pass, pass_len).Write(salt, salt_len).Write(ibe, 4).Finalize(U);
+        memcpy(T, U, H);
+        for (unsigned int j = 1; j < iterations; j++) {
+            CHMAC_SHA512(pass, pass_len).Write(U, H).Finalize(U);
+            for (size_t k = 0; k < H; k++)
+                T[k] ^= U[k];
+        }
+        size_t offset = (size_t)(i - 1) * H;
+        size_t clen = dkLen - offset;
+        if (clen > H)
+            clen = H;
+        memcpy(out + offset, T, clen);
+    }
+    memory_cleanse(U, sizeof(U));
+    memory_cleanse(T, sizeof(T));
+}
+
 // passphrase must be at most 256 characters or code may crash
 void CMnemonic::ToSeed(SecureString mnemonic, SecureString passphrase, SecureVector& seedRet)
 {
     SecureString ssSalt = SecureString("mnemonic") + passphrase;
     SecureVector vchSalt(ssSalt.begin(), ssSalt.end());
     seedRet.resize(64);
-    // int PKCS5_PBKDF2_HMAC(const char *pass, int passlen,
-    //                    const unsigned char *salt, int saltlen, int iter,
-    //                    const EVP_MD *digest,
-    //                    int keylen, unsigned char *out);
-    PKCS5_PBKDF2_HMAC(mnemonic.c_str(), mnemonic.size(), &vchSalt[0], vchSalt.size(), 2048, EVP_sha512(), 64, &seedRet[0]);
+    PBKDF2_HMAC_SHA512((const unsigned char*)mnemonic.c_str(), mnemonic.size(),
+                       &vchSalt[0], vchSalt.size(), 2048, &seedRet[0], 64);
 }
