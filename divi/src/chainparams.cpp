@@ -241,10 +241,14 @@ public:
         assert(hashGenesisBlock == uint256("0x00000e258596876664989374c7ee36445cf5f4f80889af415cc32478214394ea"));
         assert(genesis.hashMerkleRoot == uint256("0xec803cc6b5e68728ec0117cb1154b6d2893152f89d61319647db106908888bd6"));
 
-        vSeeds.push_back(CDNSSeedData("autoseeds.diviseed.diviproject.org", "autoseeds.diviseed.diviproject.org"));     // Primary DNS Seeder from Fuzzbawls
-        vSeeds.push_back(CDNSSeedData("178.62.195.16", "178.62.195.16"));
-        vSeeds.push_back(CDNSSeedData("178.62.221.33", "178.62.221.33"));
-        vSeeds.push_back(CDNSSeedData("178.128.251.20", "178.128.251.20"));
+        vSeeds.push_back(CDNSSeedData("autoseeds.divi.love", "autoseeds.divi.love"));                                    // Primary DNS seeder (divi.love — controlled by us)
+        vSeeds.push_back(CDNSSeedData("autoseeds.diviseed.diviproject.org", "autoseeds.diviseed.diviproject.org"));     // Legacy seeder from Fuzzbawls (kept as extra fallback)
+        // Fixed-IP fallbacks — the previous three were all dead; these were verified
+        // reachable on port 51472 in 2026-07. Refresh periodically.
+        vSeeds.push_back(CDNSSeedData("173.212.232.60", "173.212.232.60"));
+        vSeeds.push_back(CDNSSeedData("172.245.184.131", "172.245.184.131"));
+        vSeeds.push_back(CDNSSeedData("167.160.191.142", "167.160.191.142"));
+        vSeeds.push_back(CDNSSeedData("104.168.43.240", "104.168.43.240"));
 
         base58Prefixes[PUBKEY_ADDRESS] = std::vector<unsigned char>(1, 30);
         base58Prefixes[SCRIPT_ADDRESS] = std::vector<unsigned char>(1, 13);
