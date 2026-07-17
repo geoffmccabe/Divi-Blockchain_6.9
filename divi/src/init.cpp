@@ -78,7 +78,6 @@
 #include <boost/filesystem.hpp>
 #include <boost/interprocess/sync/file_lock.hpp>
 #include <boost/thread.hpp>
-#include <openssl/crypto.h>
 #include <I_ChainExtensionService.h>
 
 #if ENABLE_ZMQ

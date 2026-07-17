@@ -10,7 +10,6 @@
 #include "pubkey.h"
 #include "random.h"
 
-#include "ecwrapper.h"
 #include "Secp256k1Context.h"
 
 secp256k1_context* secp256k1_context_sign = Secp256k1Context::instance().GetSigningContext();

@@ -154,7 +154,6 @@ BITCOIN_CORE_H = \
   dbenv.h \
   DatabaseWrapper.h\
   eccryptoverify.h \
-  ecwrapper.h \
   FeeRate.h \
   flat-database.h \
   FilteredBoostFileSystem.h \
@@ -718,7 +717,6 @@ libbitcoin_common_a_SOURCES = \
   primitives/transaction.cpp \
   core_io.cpp \
   eccryptoverify.cpp \
-  ecwrapper.cpp \
   flat-database.cpp \
   hash.cpp \
   hdchain.cpp \
@@ -867,7 +865,6 @@ libbitcoinconsensus_la_SOURCES = \
   crypto/sha512.cpp \
   crypto/ripemd160.cpp \
   eccryptoverify.cpp \
-  ecwrapper.cpp \
   hash.cpp \
   pubkey.cpp \
   script/script.cpp \
