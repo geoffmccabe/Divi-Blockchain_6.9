@@ -81,7 +81,6 @@ HEADERS += src/activemasternode.h \
            src/divi-config.h \
            src/db.h \
            src/eccryptoverify.h \
-           src/ecwrapper.h \
            src/hash.h \
            src/init.h \
            src/swifttx.h \
@@ -378,7 +377,6 @@ SOURCES += src/activemasternode.cpp \
            src/divi.cpp \
            src/db.cpp \
            src/eccryptoverify.cpp \
-           src/ecwrapper.cpp \
            src/editaddressdialog.cpp \
            src/hash.cpp \
            src/init.cpp \

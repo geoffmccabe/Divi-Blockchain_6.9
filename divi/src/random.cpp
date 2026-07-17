@@ -89,6 +89,11 @@ static void GetOSRand(unsigned char *ent32)
 
 void GetRandBytes(unsigned char* buf, int num)
 {
+    // Fail closed: never hand back an unfilled buffer that a caller would treat
+    // as randomness. (OpenSSL's RAND_bytes aborted on invalid lengths too.)
+    if (num < 0)
+        RandFailure();
+
     // Draw directly from the OS CSPRNG (GetOSRand), 32 bytes at a time.
     unsigned char ent32[32];
     int have = 0;
