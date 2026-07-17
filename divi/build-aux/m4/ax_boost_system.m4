@@ -108,8 +108,12 @@ AC_DEFUN([AX_BOOST_SYSTEM],
 
             fi
             if test "x$ax_lib" = "x"; then
-                AC_MSG_ERROR(Could not find a version of the boost_system library!)
+                dnl Modern Boost (>=1.69) made Boost.System header-only; there is no
+                dnl library to link. Treat this as success and continue.
+                BOOST_SYSTEM_LIB=""
+                link_system="yes"
             fi
+            AC_SUBST(BOOST_SYSTEM_LIB)
 			if test "x$link_system" = "xno"; then
 				AC_MSG_ERROR(Could not link against $ax_lib !)
 			fi
