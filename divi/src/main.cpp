@@ -15,7 +15,6 @@
 #include <sstream>
 
 #include <addrman.h>
-#include <alert.h>
 #include <BlockDiskAccessor.h>
 #include <blockmap.h>
 #include <chainparams.h>

@@ -12,7 +12,6 @@
 #include "net.h"
 
 #include "addrman.h"
-#include <alert.h>
 #include <bloom.h>
 #include "chainparams.h"
 #include "clientversion.h"

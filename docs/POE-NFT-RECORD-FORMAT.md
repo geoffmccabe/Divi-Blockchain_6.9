@@ -18,7 +18,7 @@ One OP_META output per transaction (standardness rule). Value 0 (dust-exempt).
 
 | field   | size | meaning                                   |
 |---------|------|-------------------------------------------|
-| magic   | 2    | `"DV"` (0x44 0x56) — Divi metadata record |
+| magic   | 4    | `"DVXP"` (0x44 0x56 0x58 0x50) — Divi metadata record |
 | version | 1    | `0x01`                                    |
 | type    | 1    | record type (below)                       |
 | ...     | var  | type-specific body                        |
@@ -29,7 +29,7 @@ One OP_META output per transaction (standardness rule). Value 0 (dust-exempt).
 | hashAlg  | 1    | `0x01` = SHA-256              |
 | hash     | 32   | hash of the document          |
 
-Total 37 bytes. The **block timestamp** proves the document existed by then; the
+Total 39 bytes. The **block timestamp** proves the document existed by then; the
 document itself never touches the chain (private + tiny).
 
 ### type `0x02` — NFT (reserved, for the Arweave layer)

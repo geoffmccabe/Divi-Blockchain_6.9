@@ -116,7 +116,6 @@ protected:
 
     uint256 hashGenesisBlock;
     MessageStartChars pchMessageStart;
-    //! Raw pub key bytes for the broadcast alert signing key.
     int nDefaultPort;
     uint256 bnProofOfWorkLimit;
     int nMaxReorganizationDepth;

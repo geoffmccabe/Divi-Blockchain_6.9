@@ -48,7 +48,6 @@ constexpr unsigned int DEFAULT_BLOCK_MAX_SIZE = 750000;
 constexpr unsigned int DEFAULT_BLOCK_MIN_SIZE = 0;
 /** Default for -blockprioritysize, maximum space for zero/low-fee transactions **/
 constexpr unsigned int DEFAULT_BLOCK_PRIORITY_SIZE = 50000;
-/** Default for accepting alerts from the P2P network. */
 /** The maximum size for transactions we're willing to relay/mine */
 constexpr unsigned int MAX_STANDARD_TX_SIZE = 100000;
 /** The maximum allowed number of signature check operations in a block (network rule) */
