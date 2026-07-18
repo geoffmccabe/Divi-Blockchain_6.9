@@ -40,7 +40,7 @@ all heavy data lives on Arweave.
 | field         | size | meaning                                              |
 |---------------|------|------------------------------------------------------|
 | arweave_ptr   | 32   | Arweave tx id of the content bundle                  |
-| content_hash  | 32   | SHA-256 of the **plaintext** (doubles as a PoE)      |
+| content_hash  | 32   | SHA-256 of **salt‖plaintext** (salt is encrypted in the bundle — §3) |
 | flags         | 1    | bit0 encrypted · bits1-3 media class · rest reserved |
 
 65-byte body (32+32+1). The mint tx's owner = the address of the input that funded it
@@ -93,6 +93,23 @@ Domain string is versioned (`-v1`) so we can rotate the derivation later.
   `enc_pub` (X25519 ECDH → HKDF → AES-GCM key-wrap), uploads the small
   `wrapped_CK` to Arweave, writes the TRANSFER record. The big ciphertext is
   untouched.
+
+### 3b′. Hardening (from the security audit — all implemented)
+- **Authenticity is enforced on view.** After decrypting, the wallet rejects the
+  content unless `sha256(salt‖plaintext) == on-chain content_hash`. Without this
+  a malicious relay/MITM could serve attacker-chosen content that decrypts
+  cleanly; with it, the on-chain anchor actually means something.
+- **Privacy via salt.** `content_hash` covers a random 16-byte salt prepended to
+  the plaintext and encrypted inside the bundle, so an outsider holding a
+  candidate file (e.g. a known image from a released set) cannot confirm which
+  NFD an address holds by hashing. The owner still verifies (they recover the
+  salt on decrypt).
+- **Wrap-key context binding + low-order rejection.** The ECIES KDF mixes in the
+  ephemeral and recipient pubkeys, and all-zero (low-order) X25519 shared secrets
+  are rejected (`was_contributory`), closing a wrapped-key forgery path.
+- **Owner = funding address.** The mint is funded from a UTXO whose address is
+  also the key-derivation/owner address, so the party that can decrypt and the
+  party the chain calls owner are always the same.
 
 ### 3c. Vetted primitives only
 AES-256-GCM, X25519, HKDF-SHA256, SHA-256 — all from audited libraries
