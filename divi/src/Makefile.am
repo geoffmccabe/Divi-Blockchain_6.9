@@ -44,10 +44,10 @@ LIBBITCOIN_ZMQ=libbitcoin_zmq.a
 endif
 
 $(GMOCK): $(wildcard ${GMOCK_INCLUDE}/*) $(wildcard ${GTEST_INCLUDE}/*) $(GMOCK_ALL)
-	$(CC) -isystem ${GMOCK_INCLUDE} -IGMock/googlemock/ -isystem ${GTEST_INCLUDE} -IGMock/googletest -pthread -c ${GMOCK_ALL} -o $@
+	$(CXX) -isystem ${GMOCK_INCLUDE} -IGMock/googlemock/ -isystem ${GTEST_INCLUDE} -IGMock/googletest -pthread -c ${GMOCK_ALL} -o $@
 
 $(GTEST): $(wildcard ${GMOCK_INCLUDE}/*) $(wildcard ${GTEST_INCLUDE}/*) $(GTEST_ALL)
-	$(CC) -isystem ${GMOCK_INCLUDE} -IGMock/googlemock/ -isystem ${GTEST_INCLUDE} -IGMock/googletest -pthread -c ${GTEST_ALL} -o $@
+	$(CXX) -isystem ${GMOCK_INCLUDE} -IGMock/googlemock/ -isystem ${GTEST_INCLUDE} -IGMock/googletest -pthread -c ${GTEST_ALL} -o $@
 
 $(LIBGMOCK): $(GTEST) $(GMOCK)
 	ar -rv $@ $^

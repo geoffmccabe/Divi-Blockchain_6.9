@@ -2,6 +2,7 @@
 #include <gmock/gmock.h>
 #include <FilteredBoostFileSystem.h>
 #include <boost/filesystem.hpp>
+#include <fstream>
 #include <string>
 #include <algorithm>
 
@@ -27,7 +28,8 @@ public:
 
     void CreateFile(std::string filename) const
     {
-        boost::filesystem::ofstream file(dummyTestingDirectory / filename.c_str());
+        // boost::filesystem::ofstream was removed in modern Boost; use std::ofstream.
+        std::ofstream file((dummyTestingDirectory / filename.c_str()).string());
         file.close();
     }
 

@@ -31,6 +31,7 @@ BITCOIN_TESTS =\
   test/coins_tests.cpp \
   test/compress_tests.cpp \
   test/crypto_tests.cpp \
+  test/crypter_tests.cpp \
   test/DoS_tests.cpp \
   test/FakeMerkleTxConfirmationNumberCalculator.cpp \
   test/FakeBlockIndexChain.cpp \
@@ -113,7 +114,7 @@ BITCOIN_TESTS += \
 endif
 
 test_test_divi_SOURCES = $(BITCOIN_TESTS) $(JSON_TEST_FILES) $(RAW_TEST_FILES)
-test_test_divi_CPPFLAGS = $(BITCOIN_INCLUDES) -isystem $(builddir)/GMock/googlemock/include -isystem $(builddir)/GMock/googletest/include -I$(builddir)/test/ $(TESTDEFS)
+test_test_divi_CPPFLAGS = $(BITCOIN_INCLUDES) $(EVENT_CFLAGS) $(EVENT_PTHREADS_CFLAGS) -isystem $(builddir)/GMock/googlemock/include -isystem $(builddir)/GMock/googletest/include -I$(builddir)/test/ $(TESTDEFS)
 test_test_divi_LDADD = $(LIBBITCOIN_SERVER) $(LIBBITCOIN_CLI) $(LIBBITCOIN_COMMON) $(LIBBITCOIN_UTIL) $(LIBBITCOIN_CRYPTO) $(LIBBITCOIN_UNIVALUE) $(LIBBITCOIN_ZEROCOIN)
 if ENABLE_WALLET
 test_test_divi_LDADD += $(LIBBITCOIN_WALLET)
