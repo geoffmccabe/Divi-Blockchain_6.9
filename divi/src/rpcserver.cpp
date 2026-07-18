@@ -112,6 +112,7 @@ extern json_spirit::Value getlotteryblockwinners(const json_spirit::Array& param
 
 extern json_spirit::Value getblockcount(const json_spirit::Array& params, bool fHelp, CWallet* pwallet); // in rpcblockchain.cpp
 extern json_spirit::Value getbestblockhash(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
+extern json_spirit::Value getstakinginfo(const json_spirit::Array& params, bool fHelp, CWallet* pwallet); // in rpcblockchain.cpp
 extern json_spirit::Value getdifficulty(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value getrawmempool(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value getblockhash(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
@@ -342,6 +343,7 @@ static const CRPCCommand vRPCCommands[] =
         {"blockchain", "getblockchaininfo", &getblockchaininfo, true, false, false, false},
         {"blockchain", "getbestblockhash", &getbestblockhash, true, false, false, false},
         {"blockchain", "getblockcount", &getblockcount, true, false, false, false},
+        {"blockchain", "getstakinginfo", &getstakinginfo, true, false, false, false},
         {"blockchain", "getlotteryblockwinners", &getlotteryblockwinners, true, false, false, false},
         {"blockchain", "getblock", &getblock, true, false, false, false},
         {"blockchain", "getblockhash", &getblockhash, true, false, false, false},

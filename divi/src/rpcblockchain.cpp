@@ -27,9 +27,15 @@
 #include <spork.h>
 #include <I_ChainExtensionService.h>
 #include <ChainSyncHelpers.h>
+#include <DifficultyAdjuster.h>
+#include "chainparams.h"
 
 using namespace json_spirit;
 using namespace std;
+
+// Declared locally, as rpcmining.cpp does. getstakinginfo walks the block index
+// backwards, so it must hold cs_main to be safe against a concurrent reorg.
+extern CCriticalSection cs_main;
 
 Value getblockcount(const Array& params, bool fHelp, CWallet* pwallet)
 {
@@ -44,6 +50,55 @@ Value getblockcount(const Array& params, bool fHelp, CWallet* pwallet)
 
     const ChainstateManager::Reference chainstate;
     return chainstate->ActiveChain().Height();
+}
+
+Value getstakinginfo(const Array& params, bool fHelp, CWallet* pwallet)
+{
+    if (fHelp || params.size() != 0)
+        throw runtime_error(
+            "getstakinginfo\n"
+            "\nReturns the values needed to test a coin for a proof-of-stake win.\n"
+            "\nRead-only: this exposes data the node already computes and stores; it\n"
+            "changes no validation rule and requires no fork. Intended for light or\n"
+            "remote stakers, which cannot otherwise obtain the stake modifier.\n"
+            "\nResult:\n"
+            "{\n"
+            "  \"height\": n,               (numeric) height of the chain tip\n"
+            "  \"tip_hash\": \"hex\",         (string) hash of the chain tip\n"
+            "  \"tip_time\": n,             (numeric) block time of the chain tip\n"
+            "  \"stake_modifier\": \"hex\",   (string) 16-hex-digit modifier for staking on\n"
+            "                              this tip. Sent as a string because it is a full\n"
+            "                              64-bit value and every bit matters.\n"
+            "  \"modifier_height\": n,      (numeric) height the modifier came from\n"
+            "  \"bits\": n                  (numeric) difficulty target for the next block\n"
+            "}\n"
+            "\nExamples\n" +
+            HelpExampleCli("getstakinginfo", "") + HelpExampleRpc("getstakinginfo", ""));
+
+    LOCK(cs_main);
+    const ChainstateManager::Reference chainstate;
+    const CBlockIndex* tip = chainstate->ActiveChain().Tip();
+    if (!tip)
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "no chain tip available");
+
+    // Mirror PoSStakeModifierService's hardened path: the modifier for staking
+    // on this tip is the one from the most recent block that actually generated
+    // a modifier, walking back from the tip. Returning tip->nStakeModifier
+    // directly would be wrong whenever the tip did not regenerate one.
+    const CBlockIndex* modifierBlock = tip;
+    while (modifierBlock && !modifierBlock->GeneratedStakeModifier())
+        modifierBlock = modifierBlock->pprev;
+    if (!modifierBlock)
+        throw JSONRPCError(RPC_INTERNAL_ERROR, "no stake modifier found on this chain");
+
+    Object obj;
+    obj.push_back(Pair("height", tip->nHeight));
+    obj.push_back(Pair("tip_hash", tip->GetBlockHash().GetHex()));
+    obj.push_back(Pair("tip_time", (int64_t)tip->GetBlockTime()));
+    obj.push_back(Pair("stake_modifier", strprintf("%016x", modifierBlock->nStakeModifier)));
+    obj.push_back(Pair("modifier_height", modifierBlock->nHeight));
+    obj.push_back(Pair("bits", (int64_t)DifficultyAdjuster(Params()).computeNextBlockDifficulty(tip)));
+    return obj;
 }
 
 Value getbestblockhash(const Array& params, bool fHelp, CWallet* pwallet)
