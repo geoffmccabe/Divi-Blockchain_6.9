@@ -100,6 +100,8 @@ extern json_spirit::Value getwalletinfo(const json_spirit::Array& params, bool f
 extern json_spirit::Value loadwallet(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 
 extern json_spirit::Value getrawtransaction(const json_spirit::Array& params, bool fHelp, CWallet* pwallet); // in rcprawtransaction.cpp
+extern json_spirit::Value createpoe(const json_spirit::Array& params, bool fHelp, CWallet* pwallet); // in rpcpoe.cpp
+extern json_spirit::Value verifypoe(const json_spirit::Array& params, bool fHelp, CWallet* pwallet); // in rpcpoe.cpp
 extern json_spirit::Value listunspent(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value createrawtransaction(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value decoderawtransaction(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
@@ -375,6 +377,8 @@ static const CRPCCommand vRPCCommands[] =
         {"rawtransactions", "decoderawtransaction", &decoderawtransaction, true, false, false, false},
         {"rawtransactions", "decodescript", &decodescript, true, false, false, false},
         {"rawtransactions", "getrawtransaction", &getrawtransaction, true, false, false, false},
+        {"poe", "createpoe", &createpoe, false, false, true, true},
+        {"poe", "verifypoe", &verifypoe, true, false, false, false},
         {"rawtransactions", "sendrawtransaction", &sendrawtransaction, false, false, false, false},
         {"rawtransactions", "signtransactionwithaddresskey", &signtransactionwithaddresskey, false, false, false, true},
         {"rawtransactions", "signrawtransaction", &signrawtransaction, false, false, false, false}, /* uses wallet if enabled */

@@ -540,6 +540,7 @@ libbitcoin_server_a_SOURCES = \
   rpcmisc.cpp \
   rpcnet.cpp \
   rpcrawtransaction.cpp \
+  rpcpoe.cpp \
   rpcserver.cpp \
   script/sigcache.cpp \
   sporkdb.cpp \
