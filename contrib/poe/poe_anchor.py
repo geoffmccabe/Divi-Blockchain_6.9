@@ -45,7 +45,10 @@ def op_meta_script_hex(payload: bytes) -> str:
 def parse_poe(script_hex: str):
     """Parse a PoE record from an OP_META scriptPubKey, or None if it isn't one.
     Bounds-checked: safe against arbitrary/truncated on-chain nulldata outputs."""
-    b = bytes.fromhex(script_hex)
+    try:
+        b = bytes.fromhex(script_hex)
+    except (ValueError, TypeError):
+        return None
     if len(b) < 2 or b[0] != 0x6a:
         return None
     if b[1] <= 75:                          # single-byte push
@@ -75,9 +78,14 @@ def main():
     print("OP_META script  :", script)
 
     # 2. pick a UTXO to fund the anchor
-    u = rpc("listunspent")[0]
-    fee = 0.0001
-    change = round(float(u["amount"]) - fee, 8)
+    # Smallest spendable output covering fee + non-dust change (satoshi math).
+    fee_sats, min_change_sats = 10_000, 1_000
+    ok = [x for x in rpc("listunspent")
+          if x.get("spendable", True) and round(float(x["amount"]) * 1e8) >= fee_sats + min_change_sats]
+    if not ok:
+        print(">>> FAILED: no spendable output large enough (need ~0.0002 DIVI)."); sys.exit(1)
+    u = min(ok, key=lambda x: round(float(x["amount"]) * 1e8))
+    change = (round(float(u["amount"]) * 1e8) - fee_sats) / 1e8
     change_addr = rpc("getnewaddress")
 
     # 3. build raw tx: 1 input, change output + the OP_META data output (0 value)

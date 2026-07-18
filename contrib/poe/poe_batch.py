@@ -24,10 +24,15 @@
 #   poe_batch.py selftest                     # offline Merkle correctness tests
 #   poe_batch.py anchor <file1> <file2> ...    # timestamp many files, write proofs
 #   poe_batch.py verify <file> <proof.json>    # check one file against the chain
-import hashlib, json, subprocess, sys, os
+import hashlib, json, re, subprocess, sys, os
 
 CLI = os.environ.get("DIVI_CLI", "divi-cli")
 DATADIR = os.environ.get("DIVI_DATADIR", os.path.expanduser("~/.divi"))
+
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+FEE_SATS = 10_000       # 0.0001 DIVI
+MIN_CHANGE_SATS = 1_000  # keep change above dust
+MAX_PATH = 64            # a real batch never needs a proof path this deep (2**64 leaves)
 
 MAGIC = b"DVXP"; VERSION = 1; TYPE_BATCH = 0x03; ALG_SHA256 = 0x01
 BATCH_LEN = len(MAGIC) + 3 + 32   # 39
@@ -103,7 +108,10 @@ def op_meta_script_hex(payload: bytes) -> str:
 def parse_batch(script_hex: str):
     """Parse a type-0x03 batch record from an OP_META scriptPubKey, or None.
     Bounds-checked: safe against arbitrary / truncated on-chain nulldata."""
-    b = bytes.fromhex(script_hex)
+    try:
+        b = bytes.fromhex(script_hex)
+    except (ValueError, TypeError):
+        return None
     if len(b) < 2 or b[0] != 0x6a:
         return None
     if b[1] <= 75:
@@ -142,9 +150,15 @@ def cmd_anchor(paths):
     payload = build_batch_payload(root)
     print(f"record bytes    : {len(payload)} (limit 603)")
 
-    u = rpc("listunspent")[0]
-    fee = 0.0001
-    change = round(float(u["amount"]) - fee, 8)
+    # Smallest spendable output that covers the fee plus non-dust change, with
+    # satoshi math -- avoids negative/zero/dust change (which the node rejects).
+    need = FEE_SATS + MIN_CHANGE_SATS
+    ok = [x for x in rpc("listunspent")
+          if x.get("spendable", True) and round(float(x["amount"]) * 1e8) >= need]
+    if not ok:
+        print(">>> FAILED: no spendable output large enough (need ~0.0002 DIVI)."); sys.exit(1)
+    u = min(ok, key=lambda x: round(float(x["amount"]) * 1e8))
+    change = (round(float(u["amount"]) * 1e8) - FEE_SATS) / 1e8
     change_addr = rpc("getnewaddress")
     inputs = json.dumps([{"txid": u["txid"], "vout": u["vout"]}])
     try:                                         # 'data' output convention...
@@ -179,12 +193,39 @@ def cmd_anchor(paths):
     print("\n>>> BATCH ANCHORED. Keep the .diviproof.json files.")
 
 
+def _validate_proof(proof):
+    """Structural checks so a hostile/garbled proof fails cleanly (not a crash),
+    and so proof['txid'] can never smuggle a leading-dash CLI option into rpc()."""
+    if not isinstance(proof, dict):
+        return "proof is not a JSON object"
+    if not (isinstance(proof.get("txid"), str) and HEX64.match(proof["txid"])):
+        return "proof 'txid' is not a 64-hex transaction id"
+    if not (isinstance(proof.get("doc_sha256"), str) and HEX64.match(proof["doc_sha256"])):
+        return "proof 'doc_sha256' is not a 64-hex hash"
+    path = proof.get("path")
+    if not isinstance(path, list) or len(path) > MAX_PATH:
+        return "proof 'path' is missing, not a list, or too long"
+    for step in path:
+        if (not isinstance(step, list) or len(step) != 2
+                or not (isinstance(step[0], str) and HEX64.match(step[0]))
+                or not isinstance(step[1], bool)):
+            return "proof 'path' has a malformed step"
+    return None
+
+
 def cmd_verify(path, proof_path):
-    with open(proof_path) as f:
-        proof = json.load(f)
+    try:
+        with open(proof_path) as f:
+            proof = json.load(f)
+    except (OSError, ValueError) as e:
+        print(f">>> FAILED: cannot read proof file ({e})."); sys.exit(1)
+    err = _validate_proof(proof)
+    if err:
+        print(f">>> FAILED: {err}."); sys.exit(1)
+
     doc_hash = sha256_file(path)
     if doc_hash.hex() != proof["doc_sha256"]:
-        print(">>> FAIL: this file does not match the hash in the proof."); sys.exit(1)
+        print(">>> FAILED: this file does not match the hash in the proof."); sys.exit(1)
 
     recomputed = root_from_proof(doc_hash, proof["path"])
     onchain = rpc("getrawtransaction", proof["txid"], 1)
