@@ -31,6 +31,8 @@ const char* GetTxnOutputType(txnouttype t)
     case TX_HTLC: return "htlc";
     case TX_MULTISIG: return "multisig";
     case TX_NULL_DATA: return "nulldata";
+    case TX_POE: return "poe";
+    case TX_NFD: return "nfd";
     }
     return NULL;
 }
@@ -86,6 +88,16 @@ bool ExtractScriptPubKeyFormat(const CScript& scriptPubKey, txnouttype& typeRet,
     // script.
     if (scriptPubKey.size() >= 1 && scriptPubKey[0] == OP_META && scriptPubKey.IsPushOnly(scriptPubKey.begin()+1)) {
         typeRet = TX_NULL_DATA;
+        return true;
+    }
+
+    // Divi metadata-record outputs: a new opcode (OP_POE / OP_NFD) followed by a
+    // single data push. Like OP_META nulldata, these are provably unspendable
+    // (the opcode is undefined in the interpreter, so any spend fails) and
+    // prunable; recognized here so wallets/explorers classify them as first-class.
+    if (scriptPubKey.size() >= 1 && (scriptPubKey[0] == OP_POE || scriptPubKey[0] == OP_NFD)
+        && scriptPubKey.IsPushOnly(scriptPubKey.begin()+1)) {
+        typeRet = (scriptPubKey[0] == OP_POE) ? TX_POE : TX_NFD;
         return true;
     }
 
@@ -212,6 +224,8 @@ int ScriptSigArgsExpected(txnouttype t, const std::vector<std::vector<unsigned c
     {
     case TX_NONSTANDARD:
     case TX_NULL_DATA:
+    case TX_POE:
+    case TX_NFD:
         return -1;
     case TX_PUBKEY:
         return 1;
@@ -246,7 +260,8 @@ bool IsStandard(const CScript& scriptPubKey, txnouttype& whichType,unsigned maxi
             return false;
         if (m < 1 || m > n)
             return false;
-    } else if (whichType == TX_NULL_DATA && scriptPubKey.size() > maximumMetadataBytes)
+    } else if ((whichType == TX_NULL_DATA || whichType == TX_POE || whichType == TX_NFD)
+               && scriptPubKey.size() > maximumMetadataBytes)
         return false;
 
     return whichType != TX_NONSTANDARD;

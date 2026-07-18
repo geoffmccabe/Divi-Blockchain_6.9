@@ -100,8 +100,8 @@ bool MempoolConsensus::IsStandardTx(const CTransaction& tx, std::string& reason)
             return false;
         }
 
-        if (whichType == TX_NULL_DATA)
-            nDataOut++;
+        if (whichType == TX_NULL_DATA || whichType == TX_POE || whichType == TX_NFD)
+            nDataOut++; // data-carrier outputs (OP_META / OP_POE / OP_NFD): dust-exempt, one per tx
         else if ((whichType == TX_MULTISIG) && (!fIsBareMultisigStd)) {
             reason = "bare-multisig";
             return false;

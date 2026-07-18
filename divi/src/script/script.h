@@ -479,7 +479,7 @@ public:
      */
     bool IsUnspendable() const
     {
-        return (size() > 0 && *begin() == OP_META);
+        return (size() > 0 && (*begin() == OP_META || *begin() == OP_POE || *begin() == OP_NFD));
     }
 
     std::string ToString() const;

@@ -139,6 +139,12 @@ enum opcodetype
     OP_REQUIRE_COINSTAKE = 0xb9,
     OP_NOP10 = OP_REQUIRE_COINSTAKE,
 
+    // Divi metadata-record opcodes (soft fork). Used only as the first byte of a
+    // provably-unspendable output; never defined in the interpreter, so any spend
+    // attempt fails as a bad opcode on both old and new nodes (no anyone-can-spend).
+    OP_POE = 0xba,
+    OP_NFD = 0xbb,
+
     // template matching params
     OP_ANYDATA = 0xf8,
     OP_ANYHASH = 0xf9,

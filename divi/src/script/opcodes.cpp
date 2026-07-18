@@ -130,6 +130,8 @@ const char* GetOpName(opcodetype opcode)
     case OP_NOP8                   : return "OP_NOP8";
     case OP_LIMIT_TRANSFER          : return "OP_LIMIT_TRANSFER";
     case OP_REQUIRE_COINSTAKE      : return "OP_REQUIRE_COINSTAKE";
+    case OP_POE                    : return "OP_POE";
+    case OP_NFD                    : return "OP_NFD";
 
     case OP_INVALIDOPCODE          : return "OP_INVALIDOPCODE";
 

@@ -59,6 +59,8 @@ enum txnouttype
     TX_HTLC,
     TX_MULTISIG,
     TX_NULL_DATA,
+    TX_POE,  // OP_POE metadata record (proof-of-existence)
+    TX_NFD,  // OP_NFD metadata record (Non-Fungible-DIVI)
 };
 
 
