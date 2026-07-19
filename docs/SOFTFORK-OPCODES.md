@@ -1,5 +1,23 @@
 # Soft-fork opcodes: OP_POE and OP_NFD
 
+> **Implementation status (2026-07):** Phase 1 built and regtest-proven on branch
+> `feat/opcodes` — NOT activated on mainnet, no chainparams change.
+> - Opcodes allocated as **leading** opcodes on genuinely-unused bytes:
+>   `OP_POE = 0xba`, `OP_NFD = 0xbb` (not OP_NOP redefinitions, and no `OP_META`
+>   prefix). Because these bytes are undefined in the interpreter, any spend
+>   attempt fails on execution — so the outputs are **provably unspendable on both
+>   old and new nodes**, with no interpreter change and no anyone-can-spend risk.
+>   New nodes additionally recognize the pattern (new `TX_POE`/`TX_NFD` output
+>   types), treat it as standard/relayable, prune it from the UTXO set, and make
+>   0-value anchors dust-exempt (one data output per tx).
+> - PoE output: `OP_POE <push: version(01) | subtype(01 single / 03 batch) |
+>   sha256(32)>`. NFD output: `OP_NFD <push: opaque body>` (body ≤ 603 bytes;
+>   structure owned by the NFD workstream).
+> - Native RPCs implemented + tested end-to-end on regtest: `createpoe` /
+>   `verifypoe` / `createnfd` / `verifynfd`, all sharing one audited funding path
+>   (smallest spendable UTXO, satoshi math, `IsMine` change check, exact fee).
+>   `getpoe`/`listpoe` native indexing remains Phase 2.
+
 Expands section B of `ROADMAP.md`. Two backward-compatible opcodes that promote
 the already-working forkless records (the "DVXP" format,
 `docs/POE-NFT-RECORD-FORMAT.md`) into consensus-recognized, natively-indexed
