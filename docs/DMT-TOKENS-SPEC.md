@@ -1,10 +1,14 @@
-# Divi Multi-Token (DMT) — technical specification
+# Divi Meta Tokens (DMT) — technical specification
 
 **DMT** is Divi's general-purpose token layer: fungible tokens of any kind —
 divisible currencies, indivisible units (tickets, passes, credits, vouchers,
 licences, points), collectible fungibles, community/meme coins. It is
 deliberately **not** specialised to any one category; divisibility, supply
-policy and transferability are per-token settings chosen at issuance.
+policy, pricing and transferability are per-token settings chosen at issuance.
+
+The name is literal: these tokens live in Divi's **OP_META** output (Divi's name
+for `OP_RETURN`, opcode `0x6a`). Meta Tokens are metadata records the Divi chain
+carries and orders permanently.
 
 **Status:** design locked, unimplemented. **Requires no fork of any kind.**
 
@@ -170,6 +174,8 @@ Creates a token. Must reveal a prior NAME COMMIT (§7).
 | per_mint      | var  | *(open-mint only)* units per claim, must be > 0    |
 | height_start  | var  | *(open-mint only)* 0 = immediately                 |
 | height_end    | var  | *(open-mint only)* 0 = no end                      |
+| mint_price    | var  | *(open-mint only)* duffs of DIVI per claim; 0 = free |
+| price_step    | var  | *(if flagged)* added to `mint_price` per claim made |
 | metadata_ptr  | 32   | *(if flagged)* Arweave tx id                       |
 
 **Flags**
@@ -181,10 +187,14 @@ Creates a token. Must reveal a prior NAME COMMIT (§7).
 | 0x04 | metadata pointer present                                         |
 | 0x08 | **non-transferable** — only the issuer may send; holders cannot  |
 | 0x10 | issuer may mint later (mutable supply)                           |
+| 0x20 | mint proceeds are **burned**; unset = paid to the issuer address  |
+| 0x40 | **rising price** — `price_step` present (§6.3)                    |
 | rest | reserved; **must be zero** in version 0x01                       |
 
 `0x02` and `0x10` are mutually exclusive; both set is invalid. `0x08` exists for
-tickets, credentials, memberships and non-tradable points.
+tickets, credentials, memberships and non-tradable points. `0x20` and `0x40`
+are meaningful only with `0x01` (open mint); set otherwise, the record is
+ignored.
 
 **Metadata** reuses the NFD storage layer exactly — a 32-byte Arweave pointer,
 same relay, same fetch path (`docs/NFD-COLLECTIBLES-SPEC.md`). Content is a
@@ -237,10 +247,18 @@ is not carried.
 | id_tx     | var  |                                              |
 | recipient | 21   | *(optional)* absent = sender                 |
 
+**Payment.** If the token's current mint price (§6.3) is non-zero, the same
+transaction must contain an output paying **at least** that amount to the
+required destination — the issuer's address, or a provably-unspendable output if
+the burn flag `0x20` is set. Underpayment, or payment to the wrong destination,
+makes the claim invalid. Overpayment is accepted and not refunded; wallets must
+pay the exact amount.
+
 Invalid, and ignored, if: the token is not open-mint; the current height is
-outside `[height_start, height_end]`; or the cap is reached. **If the claim would
-exceed the remaining cap it is ignored entirely** — it does not mint a partial
-amount, and it does **not** count against the cap. ~4 bytes.
+outside `[height_start, height_end]`; the cap is reached; or payment is missing
+or short. **If the claim would exceed the remaining cap it is ignored entirely**
+— it does not mint a partial amount, and it does **not** count against the cap.
+~4 bytes plus the payment output.
 
 ### 5.4 `0x04` — NAME COMMIT
 
@@ -304,6 +322,34 @@ This single field is what makes DMT general-purpose rather than category-bound.
 
 An issuer may LOCK SUPPLY at any time to convert a mintable token to fixed.
 
+### 6.3 Mint pricing — set, free, or rising
+
+Open-mint tokens choose how claimants pay, if at all. All three are per-token
+settings; none is privileged by the protocol.
+
+| model   | fields                          | use                                  |
+|---------|---------------------------------|--------------------------------------|
+| Free    | `mint_price = 0`                | fair launch, airdrop, first-come      |
+| Set     | `mint_price > 0`                | fixed-price sale: tickets, passes, credits |
+| Rising  | `mint_price > 0`, flag `0x40`   | early-buyer discount; price climbs    |
+
+Rising price is deliberately the simplest possible curve:
+
+```
+price(n) = mint_price + (price_step × n)
+```
+
+where `n` is the number of claims already made. Linear, integer-only, and
+computable by anyone from chain data alone with no floating point — so every
+indexer and every wallet agrees on the exact price of the next claim. Richer
+curves (geometric, time-decaying, Dutch auction) are deliberately **excluded from
+v1**; they can be added later as a new subtype under the versioning rule in §8.
+
+**Where the money goes is the issuer's choice** (flag `0x20`): mint proceeds
+either pay the issuer's address or are burned. Note this is a *different* fee
+from ticker registration (§7.3), which is not issuer-configurable and never can
+be — see §7.4.
+
 ---
 
 ## 7. Ticker registration — commit-reveal, and pricing
@@ -364,6 +410,30 @@ recipient, no key management, and is verifiable by anyone.
 Tokens do **not** expire. Unlike domain names, a token with holders must not
 evaporate; expiry would strand real balances. Squatting is priced against, not
 timed out.
+
+### 7.4 The two fees are different, and only one is issuer-configurable
+
+These are easily confused and must never be conflated:
+
+| | **Ticker registration** (§7.3) | **Mint price** (§6.3) |
+|---|---|---|
+| Who pays | the token creator, once | each claimant, per mint |
+| Purpose | make squatting expensive | sell or distribute the token |
+| Destination | burn (or treasury) — **network-wide constant** | issuer's choice: issuer address or burn |
+| Issuer-configurable | **No, and cannot be** | **Yes** |
+
+The registration fee **cannot** be issuer-configurable, for a reason that is
+structural rather than a policy preference: it is a cost *paid by the creator*,
+and its entire purpose is to be a real, unrecoverable expense that prices out
+squatters. If a creator could direct their own registration fee to their own
+address, it would cost them nothing but transaction fees, and the anti-squatting
+mechanism would evaporate. A squatter would register thousands of tickers for
+free. **The fee must leave the creator's control permanently, or it is not a
+fee.** Burning achieves this with no trusted recipient and no key to manage, and
+anyone can verify it independently.
+
+Mint proceeds are the opposite case — that money comes *from buyers*, and where
+it goes is legitimately the issuer's business. Hence flag `0x20`.
 
 ---
 
@@ -529,15 +599,30 @@ light-client gap without putting token rules into consensus.
 
 ---
 
-## 13. Open decisions
+## 13. Decisions
 
-1. **What DMT stands for.** Used here as **Divi Multi-Token** — chosen to be
-   category-neutral, since DMT explicitly covers divisible currencies,
-   indivisible tickets/passes/credits, and community tokens alike. Easy to change
-   while unimplemented; it should be settled before it reaches an opcode name.
-2. **Ticker pricing values** (§7.3), and **burn versus treasury**. Burn
-   recommended.
-3. **Genesis height** for the ledger.
+### Settled
+
+- **DMT = Divi Meta Tokens** (Geoff, 2026-Jul-19). Matches the carrier: these are
+  metadata records in Divi's `OP_META` output.
+- **All token types supported**, not one category — free, set-price and rising
+  price mints (§6.3); divisible and indivisible (§6.1); fixed, mintable and
+  open-mint supply (§6.2); transferable and non-transferable (§5.1).
+- **Mint proceeds are issuer-configurable** (issuer address or burn, flag `0x20`).
+  **Ticker registration is not, and cannot be** — see §7.4 for why.
+- **Genesis height** is not a design decision: it is the block height at which the
+  first indexer is deployed, fixed as a compiled-in constant at that moment so
+  every implementation starts counting from the same block. It will be recorded
+  here at deployment. No action needed in advance.
+
+### Still open
+
+1. **Ticker registration price values** (§7.3) — schedule shape is specified,
+   numbers are not.
+2. **Buying tokens with DIVI** (§10.3) — the one genuinely unsolved problem.
+   Determines whether an exchange ships at all in v1.
+3. **Who may issue a token** — unrestricted, or gated at launch. Affects spam and
+   scam exposure, and is far easier to loosen later than to tighten.
 4. Whether attach-to-coin (§10.3) is pursued at all.
 
 ## 14. Build order
