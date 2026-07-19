@@ -166,8 +166,8 @@ Creates a token. Must reveal a prior NAME COMMIT (§7).
 |---------------|------|----------------------------------------------------|
 | flags         | 1    | see below                                          |
 | decimals      | 1    | 0–8; **0 = indivisible** (tickets, passes, units)  |
-| ticker_len    | 1    | 3–12                                               |
-| ticker        | var  | ASCII, `A–Z` and `0–9`, first char `A–Z`           |
+| ticker_len    | 1    | 3–8 (§7.2.1)                                       |
+| ticker        | var  | ASCII `A–Z`, `0–9`, `!#^-_+.`; first char `A–Z`     |
 | salt          | 20   | reveals the commitment                             |
 | premine       | var  | units credited to the issuer (may be 0)            |
 | cap           | var  | *(open-mint only)* total mintable, 0 = unlimited   |
@@ -437,16 +437,54 @@ does not buy the average name; they buy the ~200 valuable short tickers, and a
 take the entire premium namespace at commodity cost and resell — which is *more*
 attractive now that tickers are transferable (§7.5).
 
-| ticker length | cost         |
-|---------------|--------------|
-| 3             | 250,000 DIVI |
-| 4             | 100,000 DIVI |
-| 5             | 25,000 DIVI  |
-| 6–7           | 10,000 DIVI  |
-| 8–12          | 5,000 DIVI   |
+| ticker length | cost        |
+|---------------|-------------|
+| 3             | 50,000 DIVI |
+| 4             | 20,000 DIVI |
+| 5             | 10,000 DIVI |
+| 6–8           | 5,000 DIVI  |
 
-Anchored on Geoff's 5,000 so ordinary names are unchanged; only the scarce,
-contested end is expensive.
+(Geoff, 2026-Jul-19.) Ordinary names stay at 5,000; only the scarce, contested
+end is expensive.
+
+### 7.2.1 Ticker length and character set
+
+**Length is 3–8 characters.** The 2-and-under range is excluded entirely rather
+than priced: there are only 26 single letters and ~1,300 two-character
+combinations, so allowing them creates a pure land-grab over a tiny namespace
+with no legitimate advantage over a 3-character name. Excluding them avoids the
+fight. 8 is a generous upper bound — a token's full name belongs in its metadata
+(§5.1), not its ticker.
+
+**Character set: `A–Z`, `0–9`, and `!#^-_+.`** (Geoff, 2026-Jul-19). No
+lowercase — case-folding is a classic source of duplicate-identity bugs, and
+forbidding it outright means `DIVI` and `divi` can never be different tokens.
+First character must be a letter.
+
+Because the set is ASCII-only, the entire **Unicode homoglyph attack class is
+structurally impossible** — no Cyrillic `о` rendering as `o`, no zero-width
+joiners, no right-to-left overrides. That is a significant, free security win
+and it must not be given up later by "just adding Unicode for international
+tokens".
+
+⚠ **The punctuation does carry two costs, recorded honestly:**
+
+1. **`!` is a letter-lookalike.** `D!VI` reads as `DIVI` at a glance, exactly as
+   `D1VI` does. `.` `-` `_` are mutually confusable at small sizes. This is
+   mitigated — but not eliminated — by normalised reserved matching (§7.6) and
+   wallet warnings.
+2. **`! # ^ +` are metacharacters** in URLs and shells. A ticker appearing in an
+   explorer URL, a QR payload, a filename or a shell command needs correct
+   escaping; `#` truncates a URL at the fragment and `+` decodes as a space if
+   anyone forgets. This is an implementation-correctness burden, not a protocol
+   flaw: **every implementation must percent-encode tickers in URLs and never
+   interpolate a ticker into a shell command.** Flagged so it is designed for
+   rather than discovered.
+
+A conservative alternative, if these prove troublesome in practice, is to keep
+`-` `_` `.` only. Changing the set later is a version bump (§8), and *narrowing*
+it would strand already-registered tickers — so if it is to be narrowed, that
+must happen before launch, not after.
 
 ### 7.3.3 The real problem: DIVI's price drifts. Do NOT use a spork.
 
@@ -574,25 +612,46 @@ walked back later without breaking users. It has a predictable consequence:
 every chain that permits open issuance. Since we are not gating creation, the
 defences must live in naming rules and presentation instead.
 
-**1. Reserved tickers (protocol-enforced).** A small hardcoded list is
-unregisterable by anyone, protecting the chain's own identity: `DIVI`, `DIVIX`,
-`DMT`, `NFD`, `POE`, and close variants. Registration attempts are ignored (§8).
-Cheap, absolute, and impossible to get wrong later if done from day one.
+**1. Reserved tickers, matched on a NORMALISED form (protocol-enforced).** A
+small hardcoded list is unregisterable by anyone, protecting the chain's own
+identity: `DIVI`, `DIVIX`, `DMT`, `NFD`, `POE`.
 
-**2. Confusable-name detection (wallet/explorer, not protocol).** Tickers are
-already constrained to `A–Z` and `0–9` (§5.1), which eliminates the entire
-Unicode homoglyph attack class — no Cyrillic 'о', no zero-width characters.
-What remains is same-alphabet confusion (`DIVl`, `D1VI`, `DIVI0`). Wallets
-**must** compute visual similarity against reserved names and against tokens the
-user already holds, and warn prominently before a first interaction. This is
-deliberately *not* a protocol rule: it is heuristic, it will change as attacks
-evolve, and heuristics must never be baked into consensus or ledger state.
+Exact string matching would be **nearly useless**, because the character set
+(§7.2.1) lets an impersonator write `D1VI`, `D!VI`, `D-I-V-I`, `DIVI.` or
+`DIV_I`. Reservation is therefore checked against a normalised form:
 
-**3. Verified marking is presentation-only.** Any "verified" badge is a wallet
-and explorer concern, carrying **no weight in the ledger**. Verified and
-unverified tokens obey identical rules, and no verification status may ever
-affect balances, transfers or validity. Otherwise open issuance becomes gated
-issuance through the back door.
+1. Remove every punctuation character (`!#^-_+.`).
+2. Fold digit and punctuation lookalikes to letters:
+   `0→O`, `1→I`, `!→I`, `2→Z`, `5→S`, `8→B`.
+3. Compare the result against the identically-normalised reserved list.
+
+Any collision is refused (§8). So `DIVI`, `D1VI`, `D!VI`, `D-IVI`, `D.I.V.I` and
+`0IVI` all resolve to the same reserved name and none of them can be registered.
+This is a **protocol rule**, deliberately: it is a small, fixed, exactly
+specifiable table, and it must produce the same answer in every implementation.
+
+**2. Confusable-name warnings (wallet/explorer, NOT protocol).** Beyond the
+reserved list, wallets **must** compute visual similarity against tokens the user
+already holds and warn prominently before a first interaction — `DIVl`, `D1VI0`
+and similar near-misses on *ordinary* tokens. This stays out of the protocol on
+purpose: it is heuristic, it will change as attacks evolve, and heuristics must
+never be baked into ledger state where they can never be corrected.
+
+**3. There is no verification, and no badge — deliberately** (Geoff,
+2026-Jul-19). Marking a token "verified" is an implied endorsement, and an
+endorsement carries **legal exposure** for whoever issues it. It also invites
+exactly the wrong mental model: users would treat an unbadged token as
+"suspicious" and a badged one as "safe", outsourcing judgement to a party who
+cannot actually guarantee anything about a token's business.
+
+The protocol therefore takes no position on any token's legitimacy, and no
+implementation should introduce one. Wallets may show **facts** — issuance
+height, issuer address, supply, whether supply is locked, how many holders exist,
+whether the name is confusable with something the user holds. Facts are
+verifiable from the chain and endorse nothing. Anything reading as approval is
+out of scope.
+
+This is consistent with §2: the chain records and orders; it does not vouch.
 
 **4. Never present a ticker as identity.** The canonical identifier is the
 numeric token ID (§4.3). Wallets should show the ticker with its ID available,
@@ -841,8 +900,11 @@ light-client gap without putting token rules into consensus.
 - **Ticker pricing scales by length** (§7.3.2), by lookup table. No oracle.
 - **No spork / no live repricing** (§7.3.3). Fees are compiled-in constants,
   changed only by version bump with a published activation height.
-- **Anyone may create a token** (§7.6) — open issuance, with reserved names,
-  wallet-side confusable warnings, and presentation-only verification.
+- **Anyone may create a token** (§7.6) — open issuance, with normalised reserved
+  names and wallet-side confusable warnings.
+- **No verification and no badge** (§7.6) — an endorsement carries legal exposure
+  and teaches users the wrong mental model. Wallets show verifiable facts only.
+- **Tickers are 3–8 chars**, `A–Z 0–9 !#^-_+.`, no lowercase (§7.2.1).
 - **Partial fill at the cap boundary** (§5.3), so a losing racer is short-filled
   rather than losing their payment entirely.
 
