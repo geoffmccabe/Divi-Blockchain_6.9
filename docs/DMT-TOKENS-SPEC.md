@@ -255,10 +255,20 @@ makes the claim invalid. Overpayment is accepted and not refunded; wallets must
 pay the exact amount.
 
 Invalid, and ignored, if: the token is not open-mint; the current height is
-outside `[height_start, height_end]`; the cap is reached; or payment is missing
-or short. **If the claim would exceed the remaining cap it is ignored entirely**
-— it does not mint a partial amount, and it does **not** count against the cap.
-~4 bytes plus the payment output.
+outside `[height_start, height_end]`; the cap is already fully allocated; or
+payment is missing or short.
+
+**Partial fill at the cap boundary only** (Geoff, 2026-Jul-19). If a valid,
+fully-paid claim would exceed the remaining cap, it mints **whatever remains**
+rather than being rejected. This is deterministic — ordering is deterministic
+(§9.1) — so every indexer computes the same result. It exists to prevent a real
+loss: without it, two buyers racing for the last units both pay, and the later
+one's payment is gone with nothing returned. Partial fill converts a total loss
+into a short fill. Wallets must warn when a claim will be partially filled.
+
+This is the **only** place partial fill occurs. TRANSFER remains strictly
+all-or-nothing (§5.2); clamping there caused real divergence bugs in Counterparty
+and Omni. ~4 bytes plus the payment output.
 
 ### 5.4 `0x04` — NAME COMMIT
 
@@ -414,28 +424,74 @@ long-lived asset that must be protected, and the destination is a trusted
 constant that can only be changed by a spec version bump (§8) — never at runtime,
 never fetched over a network (§9.3).
 
-### 7.3.2 ⚠ Flat ticker pricing is the known failure mode — unresolved
+### 7.3.2 Ticker pricing scales by LENGTH — no oracle required
 
-The 5,000 figure above is recorded as instructed, but it is **flat**, and flat
-pricing is precisely what produced Namecoin's 28-out-of-120,000 outcome. A
-squatter does not care about the average name; they buy the ~200 valuable short
-tickers, and a 3-letter ticker is worth vastly more than a 10-letter one. At a
-flat 5,000 they acquire the entire premium namespace at commodity cost and
-resell — which is *more* attractive now that tickers are transferable (§7.5).
+**Scaling here means scaling by ticker length, not by DIVI's market price.** The
+length of the ticker string is present in the record itself, so the fee is a pure
+lookup table computed identically by every implementation from chain data alone.
+**No oracle, no price feed, no external input, no trusted party.**
 
-Recommended alternative, anchored on the same 5,000 so the common case is
-unchanged:
+Flat pricing is what produced Namecoin's 28-out-of-120,000 outcome. A squatter
+does not buy the average name; they buy the ~200 valuable short tickers, and a
+3-letter ticker is worth vastly more than a 10-letter one. Under a flat fee they
+take the entire premium namespace at commodity cost and resell — which is *more*
+attractive now that tickers are transferable (§7.5).
 
-| ticker length | cost        |
-|---------------|-------------|
+| ticker length | cost         |
+|---------------|--------------|
 | 3             | 250,000 DIVI |
 | 4             | 100,000 DIVI |
 | 5             | 25,000 DIVI  |
 | 6–7           | 10,000 DIVI  |
 | 8–12          | 5,000 DIVI   |
 
-Ordinary names stay at 5,000; only the scarce, contested end gets expensive.
-**Decision pending (§13).**
+Anchored on Geoff's 5,000 so ordinary names are unchanged; only the scarce,
+contested end is expensive.
+
+### 7.3.3 The real problem: DIVI's price drifts. Do NOT use a spork.
+
+Any fee denominated in DIVI becomes wrong over time — 10,000 DIVI may be trivial
+in one market and prohibitive in another. Options considered:
+
+| approach | oracle? | verdict |
+|----------|---------|---------|
+| Fixed forever | no | simple, but wrong eventually |
+| **Live spork / remote-settable** | no | **rejected — see below** |
+| **Governance constant, version-bumped** | no | **recommended for v1** |
+| Demand-adjusted from chain data | no | best long-term; deferred to v2 |
+
+**A spork is rejected, and this is a firm recommendation rather than a
+preference.** Three reasons:
+
+1. Divi's existing spork mechanism is already a documented weak point — a
+   *single hardcoded key*, no multisig, no timelock, able to change live
+   consensus-relevant values. Hanging more on it deepens an existing risk.
+2. It is precisely the antipattern this specification bans in §9.3, where
+   Counterparty fetches consensus parameters at runtime and its own source
+   comments acknowledge the hijack surface. A fee that can change under a user
+   mid-transaction is a consensus parameter in everything but name.
+3. It destroys the credibility of §11.1. "Anyone may build on this" is a much
+   weaker promise if one key can reprice the layer without warning. Live
+   repricing is exactly the grievance that motivates someone to fork the indexer.
+
+**Governance constant (recommended).** The fee table is compiled into the
+software. Changing it is a spec version bump with a published activation height
+(§8) — announced in advance, identical for everyone, effective at a known block.
+**This gives Geoff the same control**; the only difference is that the change is
+scheduled and visible rather than instant and silent. That difference is
+strictly in his favour: predictable fees are what make the layer safe to build
+on, and an announced change cannot be mistaken for an attack.
+
+**Demand adjustment (v2, no oracle).** The most durable answer, deferred only
+for complexity. Target a registration rate (say N per 1,000 blocks); if actual
+registrations exceed target the base fee rises, if below it falls, bounded by a
+floor and ceiling, computed by integer arithmetic from chain data alone. This
+targets the actual goal — deterring spam and squatting — instead of proxying it
+through fiat price, and it tracks purchasing power indirectly: if DIVI
+appreciates sharply, registrations slow and the DIVI-denominated fee falls.
+A mass-squatter drives the price up against themselves as they register.
+Specify carefully before building; determinism and integer-only math are
+mandatory.
 
 Tokens do **not** expire. Unlike domain names, a token with holders must not
 evaporate; expiry would strand real balances. Squatting is priced against, not
@@ -506,6 +562,41 @@ registration a genuine secondary value.
 
 Sender must be the current ticker owner, and the ticker must be unused. Ignored
 otherwise (§8).
+
+### 7.6 Issuance is open to anyone — and what that obliges us to build
+
+**Decision (Geoff, 2026-Jul-19): anyone may create a token. No gating, no
+allow-list, no approval.** The registry fees (§7.3.1) are the only filter.
+
+This is the right call for an open chain, and it is also the state that cannot be
+walked back later without breaking users. It has a predictable consequence:
+**scam and impersonation tokens will be created.** Not a risk — a certainty, on
+every chain that permits open issuance. Since we are not gating creation, the
+defences must live in naming rules and presentation instead.
+
+**1. Reserved tickers (protocol-enforced).** A small hardcoded list is
+unregisterable by anyone, protecting the chain's own identity: `DIVI`, `DIVIX`,
+`DMT`, `NFD`, `POE`, and close variants. Registration attempts are ignored (§8).
+Cheap, absolute, and impossible to get wrong later if done from day one.
+
+**2. Confusable-name detection (wallet/explorer, not protocol).** Tickers are
+already constrained to `A–Z` and `0–9` (§5.1), which eliminates the entire
+Unicode homoglyph attack class — no Cyrillic 'о', no zero-width characters.
+What remains is same-alphabet confusion (`DIVl`, `D1VI`, `DIVI0`). Wallets
+**must** compute visual similarity against reserved names and against tokens the
+user already holds, and warn prominently before a first interaction. This is
+deliberately *not* a protocol rule: it is heuristic, it will change as attacks
+evolve, and heuristics must never be baked into consensus or ledger state.
+
+**3. Verified marking is presentation-only.** Any "verified" badge is a wallet
+and explorer concern, carrying **no weight in the ledger**. Verified and
+unverified tokens obey identical rules, and no verification status may ever
+affect balances, transfers or validity. Otherwise open issuance becomes gated
+issuance through the back door.
+
+**4. Never present a ticker as identity.** The canonical identifier is the
+numeric token ID (§4.3). Wallets should show the ticker with its ID available,
+and must resolve by ID — never by ticker — in any security-relevant path.
 
 ---
 
@@ -747,19 +838,21 @@ light-client gap without putting token rules into consensus.
 - **Primary sale with DIVI is solved** by the priced open mint (§10.3) — atomic,
   no trust, immune to the dispenser attack.
 
+- **Ticker pricing scales by length** (§7.3.2), by lookup table. No oracle.
+- **No spork / no live repricing** (§7.3.3). Fees are compiled-in constants,
+  changed only by version bump with a published activation height.
+- **Anyone may create a token** (§7.6) — open issuance, with reserved names,
+  wallet-side confusable warnings, and presentation-only verification.
+- **Partial fill at the cap boundary** (§5.3), so a losing racer is short-filled
+  rather than losing their payment entirely.
+
 ### Still open
 
-1. **⚠ Flat vs scaled ticker pricing** (§7.3.2). Flat 5,000 is recorded as
-   instructed but is the documented Namecoin failure mode, and now more
-   attractive to squatters because tickers are resaleable. A scaled schedule
-   anchored at the same 5,000 is proposed.
-2. **Secondary sales for DIVI** (§10.3) — holder-to-holder resale is the one
-   genuinely unsolved problem. Primary sales are unaffected.
-3. **Cap-boundary partial fill** (§10.3) — prevents a rare but real loss when two
-   buyers race for the last units.
-4. **Who may issue a token** — unrestricted, or gated at launch. Affects spam and
-   scam exposure, and is far easier to loosen later than to tighten.
-5. Whether attach-to-coin (§10.3) is pursued at all.
+1. **Secondary sales for DIVI** (§10.3) — holder-to-holder resale is the one
+   genuinely unsolved problem. Primary sales are unaffected and safe.
+2. **Demand-adjusted fees** (§7.3.3) — deferred to v2; specify before building.
+3. Whether attach-to-coin (§10.3) is pursued at all.
+4. Final reserved-ticker list (§7.6).
 
 ## 14. Build order
 
