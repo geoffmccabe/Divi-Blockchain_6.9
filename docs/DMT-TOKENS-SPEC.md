@@ -392,20 +392,50 @@ genuinely in use**. The cryptography worked perfectly; the economics failed. A
 flat fee hands squatters the entire gap between a trivial cost and a name's real
 value.
 
-Registration therefore requires the ISSUE transaction to **destroy DIVI** via a
-provably-unspendable output, scaled inversely to ticker length:
+### 7.3.1 The two protocol fees (Geoff, 2026-Jul-19)
 
-| ticker length | cost   |
-|---------------|--------|
-| 3             | TBD-A  |
-| 4             | TBD-B  |
-| 5             | TBD-C  |
-| 6–7           | TBD-D  |
-| 8–12          | TBD-E  |
+Creating a token and registering a ticker are **separate, separately-priced
+operations**. A token always has a canonical numeric ID (§4.3) and works without
+a ticker; a ticker is an optional human-readable alias.
 
-**The schedule shape is specified; the values are an open decision for Geoff**
-(§13), as is burn-versus-treasury. Burning is recommended: it needs no trusted
-recipient, no key management, and is verifiable by anyone.
+| operation                | cost           | destination           |
+|--------------------------|----------------|-----------------------|
+| Create a token (ISSUE)   | 10,000 DIVI    | Divi Love treasury    |
+| Register a ticker        | 5,000 DIVI     | Divi Love treasury    |
+
+Paid as an output to the treasury address in the same transaction. The address is
+a **compiled-in constant**; the indexer rejects an ISSUE or ticker registration
+that underpays or pays elsewhere.
+
+Treasury rather than burn is a valid choice for the anti-squatting purpose: what
+matters is that the money **leaves the payer's control permanently** (§7.4), not
+where it lands. Two consequences to accept knowingly: the treasury key becomes a
+long-lived asset that must be protected, and the destination is a trusted
+constant that can only be changed by a spec version bump (§8) — never at runtime,
+never fetched over a network (§9.3).
+
+### 7.3.2 ⚠ Flat ticker pricing is the known failure mode — unresolved
+
+The 5,000 figure above is recorded as instructed, but it is **flat**, and flat
+pricing is precisely what produced Namecoin's 28-out-of-120,000 outcome. A
+squatter does not care about the average name; they buy the ~200 valuable short
+tickers, and a 3-letter ticker is worth vastly more than a 10-letter one. At a
+flat 5,000 they acquire the entire premium namespace at commodity cost and
+resell — which is *more* attractive now that tickers are transferable (§7.5).
+
+Recommended alternative, anchored on the same 5,000 so the common case is
+unchanged:
+
+| ticker length | cost        |
+|---------------|-------------|
+| 3             | 250,000 DIVI |
+| 4             | 100,000 DIVI |
+| 5             | 25,000 DIVI  |
+| 6–7           | 10,000 DIVI  |
+| 8–12          | 5,000 DIVI   |
+
+Ordinary names stay at 5,000; only the scarce, contested end gets expensive.
+**Decision pending (§13).**
 
 Tokens do **not** expire. Unlike domain names, a token with holders must not
 evaporate; expiry would strand real balances. Squatting is priced against, not
@@ -434,6 +464,48 @@ anyone can verify it independently.
 
 Mint proceeds are the opposite case — that money comes *from buyers*, and where
 it goes is legitimately the issuer's business. Hence flag `0x20`.
+
+### 7.5 Tickers are owned and transferable — with one hard rule
+
+A registered ticker is an **owned, transferable asset** held by an address, like
+a domain name. It may be registered on its own, held, and sold. Represented in
+the UI as an NFD (`docs/NFD-COLLECTIBLES-SPEC.md`) so it appears in Divi
+Collectibles alongside other owned assets; the DMT ledger remains authoritative.
+
+**The hard rule: a ticker is freely transferable until it names a live token,
+and permanently frozen to that token afterwards.**
+
+| state                        | transferable? |
+|------------------------------|---------------|
+| Registered, unused           | **Yes** — freely bought and sold |
+| Attached to a token by ISSUE | **No** — bound to that token forever |
+
+The reason is a scam vector, not tidiness. If a ticker could be detached and
+reassigned after people hold the token, then whoever controls the ticker can
+**rename a token under its holders' feet** — point the well-known name at a
+worthless new token, or strip the name off a real one. Every wallet and explorer
+would follow, because they resolve names through this ledger. That is a rug-pull
+with the protocol's assistance, and it must be structurally impossible rather
+than merely discouraged.
+
+Selling a *live* token's identity is still possible — via ISSUER TRANSFER
+(§5.7), which hands over the whole token, ticker included. What cannot happen is
+the name moving while the holders stay behind.
+
+Unused tickers being tradeable is the intended market: name speculation is
+harmless when nobody holds a balance under that name, and it gives the 5,000 DIVI
+registration a genuine secondary value.
+
+**New subtype `0x08` — TICKER TRANSFER**
+
+| field       | size | notes                          |
+|-------------|------|--------------------------------|
+| ticker_len  | 1    |                                |
+| ticker      | var  | ASCII                          |
+| new_owner   | 21   | §4.2                           |
+
+Sender must be the current ticker owner, and the ticker must be unused. Ignored
+otherwise (§8).
 
 ---
 
@@ -517,13 +589,39 @@ in order of confidence:
    script-branch refund, never a pre-signed refund chain** — transaction
    malleability is unfixed without SegWit, which breaks pre-signed chains but
    leaves script-branch refunds unaffected.
-3. **Buying tokens with DIVI — unsolved, and stated as such.** An overlay cannot
-   escrow the chain's native coin. This is exactly what broke both Counterparty
-   and Omni: a buyer matches an order, freezes the seller's tokens for a
-   settlement window, then walks away at zero cost — a free option and a
-   griefing tool. Counterparty's dispenser workaround is popular but its own lead
+3. **Buying with DIVI — the PRIMARY sale is already solved; the SECONDARY sale
+   is not.** These are different problems and were previously conflated here.
+
+   **Primary (issuer sells new units to the public): safe, atomic, no trust.**
+   This is exactly the priced open mint of §5.3 + §6.3, and it is immune to the
+   dispenser attack by construction. The buyer builds **one transaction** that
+   both pays and mints; the terms — price, cap, window — were fixed immutably at
+   issuance; and **the issuer is not a participant at mint time**. There is no
+   seller to front-run the buyer, nothing to empty, no rate to change, and
+   LOCK SUPPLY explicitly cannot stop a running open mint (§5.6). Either the
+   whole transaction is valid and the buyer gets their units, or it is invalid
+   and nothing happens. This covers ticket sales, credit sales, presales and
+   token launches — most real demand.
+
+   *Residual edge case:* two buyers racing for the last units of a cap. Both pay;
+   the later one's claim is invalid, and their payment has already gone to the
+   issuer. Bounded and rare, but a real loss. Fix under consideration: allow a
+   **partial fill at the cap boundary only** — deterministic because ordering is
+   deterministic, and it converts a total loss into a short fill. Pending (§13).
+
+   **Secondary (a holder resells to another person for DIVI): genuinely
+   unsolved.** An overlay cannot escrow the chain's native coin, so the ledger
+   can freeze the seller's tokens but cannot compel the buyer to pay. This is
+   what broke Counterparty and Omni: a buyer matches, freezes the seller's tokens
+   for a settlement window, then walks away at zero cost — a free option and a
+   griefing tool. The reverse role is worse: Counterparty's dispenser lets the
+   **seller take the buyer's coin outright** — the buyer's payment lands at the
+   seller's address, and if the seller has emptied or closed the dispenser first,
+   no tokens are returned and the protocol has no refund path. Their own lead
    maintainer calls it "a blockchain-hosted *centralized* service" where "it's
-   trivial for the seller to front-run the buyer".
+   trivial for the seller to front-run the buyer and get free BTC". **That is
+   theft of the payment, not a cancelled sale**, and it is why the dispenser
+   pattern must not be copied as-is.
 
    **Do not ship a native-coin order book.** The most promising direction is a
    narrow, optional *attach-to-coin* mode used only for the duration of one
@@ -548,6 +646,31 @@ in order of confidence:
 5. Surface the ticker-registration flow as commit → 12-minute wait → issue, and
    explain the wait as front-running protection rather than an apology.
 6. Never claim the network enforces balances (§2).
+
+### 11.1 Third-party implementations are expected and encouraged
+
+Nothing in DMT is proprietary. The record format is public, the chain is public,
+and the reference indexer is open source. **Anyone may build, with no fee and no
+permission:** their own indexer, wallet, block explorer, mobile app, minting
+front end, vending machine, marketplace, or exchange — commercial or free,
+competing directly with ours.
+
+The **only** protocol fees are the two registry costs in §7.3.1, paid once when
+creating a token or registering a ticker. Building software costs nothing, and
+running a service on top of DMT costs nothing. Charging for the scarce, canonical
+registry rather than for the software is deliberate: it keeps the ecosystem open
+while funding the layer everyone depends on.
+
+**One honest limit, stated plainly.** The registry fees are enforced by the
+indexer, not by consensus (§2). Someone could publish a modified indexer that
+recognises tokens which never paid — and in doing so they would create a
+*separate, incompatible ledger*. Their tokens would not appear in any wallet,
+explorer or exchange following this specification. Nothing prevents this
+technically; what prevents it in practice is that a token is only worth
+something if the software everyone actually uses recognises it. This is the same
+network-effect defence Ordinals and Runes rely on, and it is the honest answer
+rather than a guarantee. It is also the strongest argument for keeping the fees
+at a level the community considers fair — an unfair fee is what motivates a fork.
 
 ---
 
@@ -615,15 +738,28 @@ light-client gap without putting token rules into consensus.
   every implementation starts counting from the same block. It will be recorded
   here at deployment. No action needed in advance.
 
+- **Protocol fees** (§7.3.1): 10,000 DIVI to create a token, 5,000 DIVI to
+  register a ticker, both to the **Divi Love treasury** (Geoff, 2026-Jul-19).
+- **Tickers are owned and transferable** (§7.5), shown as NFDs, tradeable while
+  unused and frozen once they name a live token.
+- **Third-party front ends, vending machines and marketplaces are free and
+  encouraged** (§11.1). Only the registry costs anything.
+- **Primary sale with DIVI is solved** by the priced open mint (§10.3) — atomic,
+  no trust, immune to the dispenser attack.
+
 ### Still open
 
-1. **Ticker registration price values** (§7.3) — schedule shape is specified,
-   numbers are not.
-2. **Buying tokens with DIVI** (§10.3) — the one genuinely unsolved problem.
-   Determines whether an exchange ships at all in v1.
-3. **Who may issue a token** — unrestricted, or gated at launch. Affects spam and
+1. **⚠ Flat vs scaled ticker pricing** (§7.3.2). Flat 5,000 is recorded as
+   instructed but is the documented Namecoin failure mode, and now more
+   attractive to squatters because tickers are resaleable. A scaled schedule
+   anchored at the same 5,000 is proposed.
+2. **Secondary sales for DIVI** (§10.3) — holder-to-holder resale is the one
+   genuinely unsolved problem. Primary sales are unaffected.
+3. **Cap-boundary partial fill** (§10.3) — prevents a rare but real loss when two
+   buyers race for the last units.
+4. **Who may issue a token** — unrestricted, or gated at launch. Affects spam and
    scam exposure, and is far easier to loosen later than to tighten.
-4. Whether attach-to-coin (§10.3) is pursued at all.
+5. Whether attach-to-coin (§10.3) is pursued at all.
 
 ## 14. Build order
 
