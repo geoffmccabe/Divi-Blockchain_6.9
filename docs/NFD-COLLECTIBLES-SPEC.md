@@ -69,6 +69,40 @@ onboarding.
 
 ---
 
+## 2b. Ownership model — address-based, and why (the staking analysis)
+
+**Decision (locked, permanent): NFD ownership is address-based, never coin-bound.**
+An NFD is owned by a Divi *address* (recorded in the type-0x02 records and read by
+the indexer), not by holding a specific coin.
+
+Why this is not just a preference but a safety requirement on Divi — verified
+against the Divi Tokens (DMT) research, which checked Divi's own source:
+
+- Divi is proof-of-stake. A **coinstake transaction can silently consume any
+  spendable coin**, and the wallet does this automatically as its normal job. The
+  only guard (`lockunspent`) is **in-memory and lost on restart** (`wallet.h`).
+- So any design that binds an asset to a *spendable* coin (colored-coins / Runes
+  "deed coin" style) is uniquely hazardous here: staking eats the coin overnight
+  and the asset dies. This is what forced the DMT token layer to address-balances.
+- **NFDs are structurally immune**, for three independent reasons: (1) the on-chain
+  record lives in an **OP_META / OP_RETURN data output** — value 0, provably
+  unspendable, *not in the UTXO set*, so staking can never select it; (2) the
+  content lives on **Arweave**, off-chain; (3) ownership is an **address** in the
+  ledger, not a coin you must keep holding. Stake/spend/consolidate freely —
+  ownership is unaffected.
+
+Consequences:
+- **Never** offer a "the collectible *is* this coin" mode on Divi. A future OP_NFD
+  must also stay address-based. This also deletes the coin-protection workstream
+  (the most error-prone part on other chains).
+- **Ignore, never destroy.** An unknown/malformed NFD record must be *skipped*,
+  never treated as "burn" — protects against our own future format upgrades.
+- **Transfers need a little DIVI at the owner address** to authorize (prove
+  control by spending/ signing). Never a loss; the wallet keeps a small reserve.
+- **Shared indexer.** NFDs (type 0x02) and DMT tokens (type 0x04) share the DVXP
+  envelope and the address-ledger model — build one indexer with one per-block
+  state fingerprint, serving both. Coordinate with the chain/DMT workstreams.
+
 ## 3. Crypto design (the security-critical part)
 
 ### 3a. Sign-to-derive — an encryption key from the wallet, without exposing it
@@ -141,6 +175,13 @@ Follows the shared shape in `SOFTFORK-OPCODES.md`: a provably-unspendable output
 rule = **structural validity only**; all convenience lives in RPC + the built-in
 index. The opcode drops the 4-byte `DVXP` magic (smaller records) and gives
 native recognition + indexing (no external indexer, no `txindex`).
+
+**Honesty (say this in marketing):** OP_NFD does **not** make the network
+*enforce* ownership — that would require the whole NFD ledger inside consensus (a
+much larger, permanent commitment). It buys recognition, structural validation,
+built-in indexing, native commands, and a few saved bytes. So the accurate claim
+is "permanently recorded and ordered by the Divi chain," never "consensus-
+enforced." Same standard as the encryption claim ("private, not uncopyable").
 
 **Subtypes** carry the exact meanings from §2 (mint `0x01`, transfer `0x02`,
 key-announce `0x03`), so the crypto/ownership logic is unchanged — only the
