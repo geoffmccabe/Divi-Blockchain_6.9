@@ -29,6 +29,8 @@
 #include <ChainSyncHelpers.h>
 #include <DifficultyAdjuster.h>
 #include <chain.h>
+#include "coins.h"
+#include <JsonParseHelpers.h>
 #include "primitives/transaction.h"
 #include "primitives/block.h"
 #include "script/script.h"
@@ -116,9 +118,9 @@ Value getstakinginfo(const Array& params, bool fHelp, CWallet* pwallet)
 
 Value getstaketemplate(const Array& params, bool fHelp, CWallet* pwallet)
 {
-    if (fHelp || params.size() != 3)
+    if (fHelp || params.size() != 2)
         throw runtime_error(
-            "getstaketemplate \"txid\" vout \"address\"\n"
+            "getstaketemplate \"txid\" vout\n"
             "\nReturns an UNSIGNED coinstake for staking the given output, plus the\n"
             "header fields needed to build the block. For light/remote stakers that\n"
             "hold the key but cannot compute consensus-required payments.\n"
@@ -126,24 +128,35 @@ Value getstaketemplate(const Array& params, bool fHelp, CWallet* pwallet)
             "produced by the node's own logic (GetBlockSubsidity + FillBlockPayee), so\n"
             "a remote signer never has to reimplement consensus-critical payment rules\n"
             "-- getting those wrong means every block it makes is rejected.\n"
+            "\nThe staker's share is paid back to the STAKED OUTPUT'S OWN script. It is\n"
+            "not a free choice: CheckBlockSignature verifies the block signature against\n"
+            "vout[1]'s key, so paying anywhere else yields a template that cannot be\n"
+            "signed at all, and vault scripts additionally require paying back to the\n"
+            "vault.\n"
             "\nRead-only: builds and returns a template. Signs nothing, spends nothing,\n"
             "broadcasts nothing, and needs no private key.\n"
             "\nArguments:\n"
             "1. \"txid\"     (string, required) txid of the output being staked\n"
             "2. vout        (numeric, required) its index\n"
-            "3. \"address\"  (string, required) where the staker's share is paid\n"
             "\nResult:\n"
             "{\n"
             "  \"coinstake_hex\": \"hex\",   (string) the UNSIGNED coinstake\n"
             "  \"stake_value\": n,          (numeric) value of the staked output, satoshis\n"
-            "  \"stake_reward\": n,         (numeric) the staker's reward, satoshis\n"
-            "  \"height\": n,               (numeric) height this block would occupy\n"
-            "  \"prev_block_hash\": \"hex\",\n"
+            "  \"staker_credit\": n,        (numeric) what vout[1] pays back\n"
+            "  \"staker_reward\": n,        (numeric) the staker's actual gain\n"
+            "  \"payout_script\": \"hex\",   (string) the script the stake returns to\n"
+            "  \"confirmations\": n,        (numeric) depth of the staked output\n"
+            "  \"height\": n, \"prev_block_hash\": \"hex\",\n"
             "  \"version\": n, \"bits\": n, \"tip_time\": n\n"
             "}\n"
             "\nExamples\n" +
-            HelpExampleCli("getstaketemplate", "\"txid\" 1 \"DAddress\"") +
-            HelpExampleRpc("getstaketemplate", "\"txid\", 1, \"DAddress\""));
+            HelpExampleCli("getstaketemplate", "\"txid\" 1") +
+            HelpExampleRpc("getstaketemplate", "\"txid\", 1"));
+
+    const uint256 txid = ParseHashV(params[0], "txid");
+    const int voutIndex = params[1].get_int();
+    if (voutIndex < 0)
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "vout must not be negative");
 
     LOCK(cs_main);
     const ChainstateManager::Reference chainstate;
@@ -151,59 +164,55 @@ Value getstaketemplate(const Array& params, bool fHelp, CWallet* pwallet)
     if (!tip)
         throw JSONRPCError(RPC_INTERNAL_ERROR, "no chain tip available");
 
-    const uint256 txid(params[0].get_str());
-    const int voutIndex = params[1].get_int();
-    if (voutIndex < 0)
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "vout must not be negative");
+    // Read the output from the UTXO set rather than GetTransaction(fAllowSlow).
+    // The slow path reads and deserializes the whole containing block from disk,
+    // and this call holds cs_main throughout -- a remote caller looping over cold
+    // txids would stall block processing and staking. The coins view also proves
+    // the output is UNSPENT and bounds-checks the index for us.
+    CCoins coins;
+    if (!chainstate->CoinsTip().GetCoins(txid, coins) || !coins.IsAvailable(voutIndex))
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY,
+                           "no such unspent output (already spent, or never existed)");
 
-    CBitcoinAddress address(params[2].get_str());
-    if (!address.IsValid())
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "invalid Divi address");
-    const CScript payoutScript = GetScriptForDestination(address.Get());
+    const CAmount stakeValue = coins.vout[voutIndex].nValue;
+    // Consensus, not preference: the block signature is checked against vout[1],
+    // so the stake must return to the staked output's own script.
+    const CScript payoutScript = coins.vout[voutIndex].scriptPubKey;
 
-    // Look up the output being staked so we know its value.
-    CTransaction fundingTx;
-    uint256 fundingBlockHash;
-    if (!GetTransaction(txid, fundingTx, fundingBlockHash, true))
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "cannot find that transaction");
-    if (static_cast<size_t>(voutIndex) >= fundingTx.vout.size())
-        throw JSONRPCError(RPC_INVALID_PARAMETER, "vout index out of range");
-    const CAmount stakeValue = fundingTx.vout[voutIndex].nValue;
+    const int confirmations = tip->nHeight - coins.nHeight + 1;
+    if (confirmations < Params().COINBASE_MATURITY())
+        throw JSONRPCError(RPC_INVALID_PARAMETER,
+                           strprintf("output has %d confirmations, needs %d to stake",
+                                     confirmations, Params().COINBASE_MATURITY()));
 
-    // Reward for the next block, from the node's own subsidy schedule.
     const CBlockRewards subsidy =
         GetBlockSubsidies().blockSubsidiesProvider().GetBlockSubsidity(tip->nHeight + 1);
 
-    // Mirror PoSTransactionCreator: the staker gets back the stake plus the stake
-    // reward (plus the masternode share once masternodes are deprecated).
     CAmount credit = stakeValue + subsidy.nStakeReward;
     if (ActivationState(tip).IsActive(Fork::DeprecateMasternodes))
         credit += subsidy.nMasternodeReward;
 
-    // vout[0] empty is what marks a coinstake (CTransaction::IsCoinStake).
     CMutableTransaction coinstake;
     coinstake.vin.push_back(CTxIn(txid, static_cast<uint32_t>(voutIndex)));
-    coinstake.vout.push_back(CTxOut(0, CScript()));
+    coinstake.vout.push_back(CTxOut(0, CScript()));   // the coinstake marker
     coinstake.vout.push_back(CTxOut(credit, payoutScript));
 
-    // Append the consensus-required payments. This is the part a remote signer
-    // must not invent for itself.
     GetBlockIncentivesPopulator().FillBlockPayee(coinstake, subsidy, tip);
 
     Object obj;
     obj.push_back(Pair("coinstake_hex", EncodeHexTx(coinstake)));
     obj.push_back(Pair("stake_value", stakeValue));
-    // What the staker actually receives, so a remote signer can verify its own
-    // payout exactly. Reporting only nStakeReward would understate it wherever
-    // the masternode share also goes to the staker (Fork::DeprecateMasternodes),
-    // and a signer checking against the wrong figure would reject a valid
-    // coinstake.
+    // What the staker actually receives. Reporting only nStakeReward understates
+    // it wherever the masternode share also goes to the staker, and a signer
+    // verifying against the wrong figure would reject valid work.
     obj.push_back(Pair("staker_credit", credit));
     obj.push_back(Pair("staker_reward", credit - stakeValue));
     obj.push_back(Pair("subsidy_stake_reward", subsidy.nStakeReward));
     obj.push_back(Pair("subsidy_masternode_reward", subsidy.nMasternodeReward));
     obj.push_back(Pair("masternodes_deprecated",
                        ActivationState(tip).IsActive(Fork::DeprecateMasternodes)));
+    obj.push_back(Pair("payout_script", HexStr(payoutScript)));
+    obj.push_back(Pair("confirmations", confirmations));
     obj.push_back(Pair("height", tip->nHeight + 1));
     obj.push_back(Pair("prev_block_hash", tip->GetBlockHash().GetHex()));
     obj.push_back(Pair("version", 4));
@@ -221,8 +230,10 @@ Value submitstakeblock(const Array& params, bool fHelp, CWallet* pwallet)
             "signature produced elsewhere -- by a light or remote staker holding the key.\n"
             "\nThe node reassembles the block itself (deterministic coinbase + the supplied\n"
             "coinstake) and recomputes the merkle root, rejecting the submission if it\n"
-            "differs from the one that was signed. A malformed submission therefore fails\n"
-            "cleanly here instead of becoming an invalid block on the network.\n"
+            "differs from the one that was signed. That check catches mistakes, NOT\n"
+            "malice -- an attacker simply supplies the matching root. Everything that\n"
+            "actually protects the network happens in full block validation, which runs\n"
+            "before the tip moves or anything is relayed.\n"
             "\nArguments:\n"
             "1. \"coinstake_hex\"    (string, required) the SIGNED coinstake\n"
             "2. \"block_signature\"  (string, required) signature over the block hash\n"
@@ -276,7 +287,7 @@ Value submitstakeblock(const Array& params, bool fHelp, CWallet* pwallet)
     // mismatch means the signer committed to a different block than we would
     // build, so the signature would not apply -- fail here rather than publish.
     block.hashMerkleRoot = block.BuildMerkleTree();
-    const uint256 claimedRoot(params[3].get_str());
+    const uint256 claimedRoot = ParseHashV(params[3], "merkle_root");
     if (block.hashMerkleRoot != claimedRoot)
         throw JSONRPCError(
             RPC_INVALID_PARAMETER,
