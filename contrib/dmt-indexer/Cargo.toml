@@ -1,0 +1,15 @@
+[package]
+name = "dmt-indexer"
+version = "0.1.0"
+edition = "2021"
+description = "Reference indexer for Divi Meta Tokens (DMT). Normative implementation -- see docs/DMT-TOKENS-SPEC.md"
+license = "MIT"
+
+[dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]
+
+[lib]
+name = "dmt_indexer"
+path = "src/lib.rs"

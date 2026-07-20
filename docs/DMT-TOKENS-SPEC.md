@@ -620,10 +620,16 @@ Exact string matching would be **nearly useless**, because the character set
 (§7.2.1) lets an impersonator write `D1VI`, `D!VI`, `D-I-V-I`, `DIVI.` or
 `DIV_I`. Reservation is therefore checked against a normalised form:
 
-1. Remove every punctuation character (`!#^-_+.`).
-2. Fold digit and punctuation lookalikes to letters:
-   `0→O`, `1→I`, `!→I`, `2→Z`, `5→S`, `8→B`.
+1. **Fold lookalikes to letters first:** `0→O`, `1→I`, `!→I`, `2→Z`, `5→S`,
+   `8→B`.
+2. **Then** remove every remaining punctuation character (`#^-_+.`).
 3. Compare the result against the identically-normalised reserved list.
+
+**The order is load-bearing.** `!` is both punctuation and a letter-lookalike. If
+punctuation were stripped first, `D!VI` would reduce to `DVI` and would *not*
+collide with `DIVI` — the exact impersonation the rule exists to stop. Folding
+first makes `D!VI → DIVI`. Any implementation that reverses these two steps has
+a live impersonation hole while still passing a naive test suite.
 
 Any collision is refused (§8). So `DIVI`, `D1VI`, `D!VI`, `D-IVI`, `D.I.V.I` and
 `0IVI` all resolve to the same reserved name and none of them can be registered.
