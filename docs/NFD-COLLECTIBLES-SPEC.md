@@ -39,12 +39,24 @@ all heavy data lives on Arweave.
 ### subtype `0x01` — MINT
 | field         | size | meaning                                              |
 |---------------|------|------------------------------------------------------|
-| arweave_ptr   | 32   | Arweave tx id of the content bundle                  |
+| arweave_ptr   | 32   | Arweave tx id of the encrypted content bundle        |
 | content_hash  | 32   | SHA-256 of **salt‖plaintext** (salt is encrypted in the bundle — §3) |
-| flags         | 1    | bit0 encrypted · bits1-3 media class · rest reserved |
+| flags         | 1    | bit0 = encrypted · **bit1 = has public thumbnail** · rest reserved |
+| thumb_ptr     | 32   | *present only if bit1 set* — Arweave tx id of the public thumbnail |
 
-65-byte body (32+32+1). The mint tx's owner = the address of the input that funded it
-(first mint owner); recorded by the indexer, not spelled out in the body.
+65 bytes, or 97 with a thumbnail. The HAS_THUMB flag and the appended pointer are
+derived together, so they can never disagree; a set flag with no pointer is
+rejected (ignored, never destructive). The mint tx's owner = the address of the
+input that funded it (§2b), recorded by the indexer, not spelled out in the body.
+
+**Public thumbnail (optional, creator's choice).** A collectible may carry an
+**unencrypted** preview image the creator chose to publish, stored as its own
+Arweave object and served with its real image content-type. This is what lets a
+collectible be shown, browsed, and shared while the full-quality original stays
+encrypted (only the owner unlocks it — §3). The wallet downscales it locally to
+**≤500px on the longest side** (WebP, JPEG fallback) before upload. Because an
+Arweave id is content-derived, `thumb_ptr` already pins the exact preview bytes.
+Default in the wallet is on, but it is always the creator's decision per mint.
 
 ### subtype `0x02` — TRANSFER
 | field         | size | meaning                                              |
