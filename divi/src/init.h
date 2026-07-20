@@ -17,6 +17,8 @@ class CChainParams;
 class CChain;
 class BlockMap;
 class I_BlockSubmitter;
+class I_SuperblockSubsidyContainer;
+class I_BlockIncentivesPopulator;
 class I_ChainExtensionService;
 
 namespace boost
@@ -40,6 +42,8 @@ void FlushStateToDisk();
 
 const I_ChainExtensionService& GetChainExtensionService();
 const I_BlockSubmitter& GetBlockSubmitter();
+const I_SuperblockSubsidyContainer& GetBlockSubsidies();
+const I_BlockIncentivesPopulator& GetBlockIncentivesPopulator();
 
 bool VerifyChain(int nCheckLevel, int nCheckDepth, bool useCoinTip);
 CTxMemPool& GetTransactionMemoryPool();

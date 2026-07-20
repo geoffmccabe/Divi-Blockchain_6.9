@@ -203,6 +203,14 @@ const I_BlockSubmitter& GetBlockSubmitter()
 {
     return chainExtensionModule->getBlockSubmitter();
 }
+const I_SuperblockSubsidyContainer& GetBlockSubsidies()
+{
+    return chainExtensionModule->getBlockSubsidies();
+}
+const I_BlockIncentivesPopulator& GetBlockIncentivesPopulator()
+{
+    return chainExtensionModule->getBlockIncentivesPopulator();
+}
 
 bool ManualBackupWallet(const std::string& strDest)
 {
