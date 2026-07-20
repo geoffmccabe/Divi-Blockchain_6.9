@@ -23,7 +23,9 @@ use std::collections::HashMap;
 const SUB_MINT: u8 = 0x01;
 const SUB_TRANSFER: u8 = 0x02;
 const SUB_KEYANNOUNCE: u8 = 0x03;
+const SUB_COLLECTION: u8 = 0x04;
 const FLAG_HAS_THUMB: u8 = 0x02;
+const FLAG_IN_COLLECTION: u8 = 0x04;
 
 /// A packed address: `kind` byte + 20-byte hash160.
 pub type Addr21 = [u8; 21];
@@ -42,15 +44,26 @@ pub struct Nfd {
     pub arweave_ptr: [u8; 32],
     pub content_hash: [u8; 32],
     pub thumb_ptr: Option<[u8; 32]>,
+    pub collection_id: Option<[u8; 32]>,
     pub mint_height: u64,
     pub mint_tx_index: u32,
+}
+
+/// A collection: creator-owned, capped, with public metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Collection {
+    pub creator: Addr21,
+    pub max_supply: u32, // 0 = uncapped
+    pub meta_ptr: [u8; 32],
+    pub minted: u32,
 }
 
 /// The NFD ownership ledger. Keyed by mint txid (the collectible's id).
 #[derive(Default)]
 pub struct NfdLedger {
     nfds: HashMap<[u8; 32], Nfd>,
-    keys: HashMap<Addr21, [u8; 32]>, // address -> announced X25519 encryption pubkey
+    collections: HashMap<[u8; 32], Collection>, // collection id (create txid) -> collection
+    keys: HashMap<Addr21, [u8; 32]>,            // address -> announced X25519 encryption pubkey
 }
 
 impl NfdLedger {
@@ -74,6 +87,12 @@ impl NfdLedger {
     pub fn count(&self) -> usize {
         self.nfds.len()
     }
+    pub fn collection_of(&self, id: &[u8; 32]) -> Option<&Collection> {
+        self.collections.get(id)
+    }
+    pub fn collection_count(&self) -> usize {
+        self.collections.len()
+    }
 
     fn sender(ctx: &RecordContext) -> Result<Addr21, Ignored> {
         ctx.sender.as_ref().map(packed).ok_or(Ignored::RuleViolation("no resolvable sender"))
@@ -85,6 +104,13 @@ impl NfdLedger {
         let content_hash = read32(&mut c)?;
         let flags = c.read_u8().map_err(|_| Ignored::Malformed("flags"))?;
         let thumb_ptr = if flags & FLAG_HAS_THUMB != 0 { Some(read32(&mut c)?) } else { None };
+        let collection_ref = if flags & FLAG_IN_COLLECTION != 0 {
+            let cid = read32(&mut c)?;
+            let _traits_ptr = read32(&mut c)?; // public traits JSON id (indexer keeps only the ref)
+            Some(cid)
+        } else {
+            None
+        };
         if !c.is_empty() {
             return Err(Ignored::TrailingBytes);
         }
@@ -94,9 +120,30 @@ impl NfdLedger {
             return Err(Ignored::RuleViolation("duplicate mint id for this tx"));
         }
         let owner = Self::sender(ctx)?;
+
+        // Collection rules: only the creator may mint into it, and not past the cap.
+        if let Some(cid) = collection_ref {
+            let col = self.collections.get_mut(&cid).ok_or(Ignored::RuleViolation("unknown collection"))?;
+            if col.creator != owner {
+                return Err(Ignored::RuleViolation("only the collection creator may mint into it"));
+            }
+            if col.max_supply != 0 && col.minted >= col.max_supply {
+                return Err(Ignored::RuleViolation("collection is minted out"));
+            }
+            col.minted += 1;
+        }
+
         self.nfds.insert(
             ctx.txid,
-            Nfd { owner, arweave_ptr, content_hash, thumb_ptr, mint_height: ctx.height, mint_tx_index: ctx.tx_index },
+            Nfd {
+                owner,
+                arweave_ptr,
+                content_hash,
+                thumb_ptr,
+                collection_id: collection_ref,
+                mint_height: ctx.height,
+                mint_tx_index: ctx.tx_index,
+            },
         );
         let mut d = vec![SUB_MINT];
         d.extend_from_slice(&ctx.txid);
@@ -139,6 +186,25 @@ impl NfdLedger {
         d.extend_from_slice(&enc_pubkey);
         Ok(d)
     }
+
+    fn apply_collection_create(&mut self, body: &[u8], ctx: &RecordContext) -> Result<Vec<u8>, Ignored> {
+        let mut c = Cursor::new(body);
+        let ms = c.read_bytes(4).map_err(|_| Ignored::Malformed("max_supply"))?;
+        let max_supply = u32::from_be_bytes([ms[0], ms[1], ms[2], ms[3]]);
+        let meta_ptr = read32(&mut c)?;
+        if !c.is_empty() {
+            return Err(Ignored::TrailingBytes);
+        }
+        if self.collections.contains_key(&ctx.txid) {
+            return Err(Ignored::RuleViolation("duplicate collection id for this tx"));
+        }
+        let creator = Self::sender(ctx)?;
+        self.collections.insert(ctx.txid, Collection { creator, max_supply, meta_ptr, minted: 0 });
+        let mut d = vec![SUB_COLLECTION];
+        d.extend_from_slice(&ctx.txid);
+        d.extend_from_slice(&creator);
+        Ok(d)
+    }
 }
 
 impl RecordHandler for NfdLedger {
@@ -151,6 +217,7 @@ impl RecordHandler for NfdLedger {
             SUB_MINT => self.apply_mint(rec.body, ctx),
             SUB_TRANSFER => self.apply_transfer(rec.body, ctx),
             SUB_KEYANNOUNCE => self.apply_key_announce(rec.body, ctx),
+            SUB_COLLECTION => self.apply_collection_create(rec.body, ctx),
             other => Err(Ignored::UnknownSubtype(other)),
         }
     }
@@ -261,6 +328,37 @@ mod tests {
         long.push(0x00);
         assert!(l.apply(&rec(SUB_MINT, &long), &ctx(1, Some(addr(7)))).is_err());
         assert!(l.apply(&rec(0x09, &[]), &ctx(1, Some(addr(7)))).is_err());
+    }
+
+    fn coll_mint_body(cid: &[u8; 32]) -> Vec<u8> {
+        let mut b = vec![0xaa; 32];
+        b.extend_from_slice(&[0xbb; 32]);
+        b.push(0x05); // FLAG_ENCRYPTED | FLAG_IN_COLLECTION
+        b.extend_from_slice(cid);
+        b.extend_from_slice(&[0xdd; 32]); // traits_ptr
+        b
+    }
+
+    #[test]
+    fn collection_creator_only_and_cap_enforced() {
+        let mut l = NfdLedger::new();
+        // creator = addr 7 makes a collection with cap 1 at tx 100
+        let mut cbody = 1u32.to_be_bytes().to_vec();
+        cbody.extend_from_slice(&[0xee; 32]); // meta_ptr
+        l.apply(&rec(SUB_COLLECTION, &cbody), &ctx(100, Some(addr(7)))).unwrap();
+        let cid = [100u8; 32];
+        assert_eq!(l.collection_count(), 1);
+
+        // a non-creator cannot mint into it
+        assert!(l.apply(&rec(SUB_MINT, &coll_mint_body(&cid)), &ctx(101, Some(addr(9)))).is_err());
+        // the creator can (fills the cap)
+        l.apply(&rec(SUB_MINT, &coll_mint_body(&cid)), &ctx(102, Some(addr(7)))).unwrap();
+        assert_eq!(l.collection_of(&cid).unwrap().minted, 1);
+        assert_eq!(l.get(&[102; 32]).unwrap().collection_id, Some(cid));
+        // now minted out
+        assert!(l.apply(&rec(SUB_MINT, &coll_mint_body(&cid)), &ctx(103, Some(addr(7)))).is_err());
+        // minting into an unknown collection is rejected
+        assert!(l.apply(&rec(SUB_MINT, &coll_mint_body(&[0xff; 32])), &ctx(104, Some(addr(7)))).is_err());
     }
 
     #[test]

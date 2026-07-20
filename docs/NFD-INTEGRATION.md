@@ -109,15 +109,23 @@ AES-256-GCM under a random key that's ECIES-wrapped to the owner. Full detail in
 ## Roadmap (what to build against)
 
 - **Done (forkless v1):** mint, view/decrypt, transfer (address→address),
-  optional public thumbnail, treasury fees. Proven end-to-end on regtest.
-- **Next:** a shared **chain scanner** (in `dvxp-core`) for automatic
-  discovery/enumeration — turns transfers from a code-handoff into
-  "enter address, send," and powers explorers without each running a full indexer.
+  optional public thumbnail, treasury fees, and the **collections** on-chain
+  format + indexer (creator-only, capped, ERC-721-style public traits). Proven
+  end-to-end on regtest.
+- **Next:** the wallet-side **collection builder flow + UI** (create a collection,
+  mint into it with traits, browse a collection with rarity), and a shared **chain
+  scanner** (in `dvxp-core`) for automatic discovery/enumeration — turns transfers
+  from a code-handoff into "enter address, send," and powers explorers without
+  each running a full indexer.
+- **Later — Marketplace + Builder (planned):** an **identical** NFD marketplace +
+  builder will ship in **DD69 first, then be ported to the divi.love website**.
+  Build the UI portably (shared React) so the two stay identical. It's built on
+  the ownership ledger + transfers + collections here — trading uses signed
+  offers (see the DMT DEX research), never a custodial escrow.
 - **Later:** `OP_NFD` **soft-fork opcode** — native recognition, built-in
   indexing, and native RPCs (`createnfd`/`getnfd`/`listnfd`/…). Records get
   smaller; verification no longer needs an external indexer. Backward-compatible;
   the forkless records stay valid forever, so **verifiers must accept both forms**.
-- **Later:** marketplace (built on the ownership ledger + transfers).
 
 ## Where the code lives
 

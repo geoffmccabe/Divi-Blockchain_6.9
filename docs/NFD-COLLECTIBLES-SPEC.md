@@ -41,7 +41,7 @@ all heavy data lives on Arweave.
 |---------------|------|------------------------------------------------------|
 | arweave_ptr   | 32   | Arweave tx id of the encrypted content bundle        |
 | content_hash  | 32   | SHA-256 of **salt‖plaintext** (salt is encrypted in the bundle — §3) |
-| flags         | 1    | bit0 = encrypted · **bit1 = has public thumbnail** · rest reserved |
+| flags         | 1    | bit0 = encrypted · bit1 = has public thumbnail · **bit2 = in a collection** · rest reserved |
 | thumb_ptr     | 32   | *present only if bit1 set* — Arweave tx id of the public thumbnail |
 
 65 bytes, or 97 with a thumbnail. The HAS_THUMB flag and the appended pointer are
@@ -90,6 +90,36 @@ The indexer replays mint→transfer→transfer… to compute the current owner.
 Published once per address so senders can wrap content keys to it. A recipient
 who never announced can't receive a transfer — the wallet prompts this at
 onboarding.
+
+### subtype `0x04` — COLLECTION-CREATE
+| field         | size | meaning                                              |
+|---------------|------|------------------------------------------------------|
+| max_supply    | 4    | u32 big-endian cap (0 = uncapped)                    |
+| meta_ptr      | 32   | Arweave id of the public collection metadata JSON    |
+
+36-byte body. The **creator** is the record's sender; the **collection id** is
+this tx's txid. A mint joins a collection by setting flag bit2 and appending
+`collection_id`(32) + `traits_ptr`(32) to its body.
+
+## 2c. Collections (ERC-721-style, hybrid)
+
+Collections replicate ERC-721 functionality and metadata, with the NFD twist:
+**traits and the preview are PUBLIC** (so marketplaces browse/filter/rank exactly
+like ERC-721), while the **full-quality original stays encrypted** for the owner.
+
+- **Creator-only, capped, incremental.** Only the collection's creator may mint
+  into it; the indexer rejects a mint whose sender ≠ creator, or past `max_supply`
+  (advisory client-side; authoritative in the indexer; consensus-enforced later
+  via `OP_NFD`). The creator mints over time up to the cap.
+- **Public metadata (unencrypted, on Arweave), ERC-721 schema:**
+  - *Collection* (`meta_ptr`): `{ name, description, image, external_url? }`
+    (image = banner).
+  - *Per-item traits* (`traits_ptr`): `{ name?, description?, image?, attributes:
+    [{ trait_type, value, display_type? }] }`. `image` here = the public preview.
+- **Rarity** is NOT stored on-chain — it's derived by explorers/marketplaces from
+  the trait distribution across the collection (standard ERC-721 practice).
+- The encrypted original + `content_hash` authenticity are unchanged (§3); the
+  public traits are the creator's claim, same caveat as the preview.
 
 ---
 
