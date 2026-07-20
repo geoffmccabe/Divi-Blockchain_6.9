@@ -1,0 +1,13 @@
+[package]
+name = "nfd-indexer"
+version = "0.1.0"
+edition = "2021"
+description = "Reference indexer handler for NFD / Divi Collectibles (record type 0x02). A dvxp-core RecordHandler that replays mint/transfer/key-announce into an address-based ownership ledger. Normative -- see docs/NFD-COLLECTIBLES-SPEC.md."
+license = "MIT"
+
+[dependencies]
+dvxp-core = { path = "../dvxp-core" }
+
+[lib]
+name = "nfd_indexer"
+path = "src/lib.rs"
