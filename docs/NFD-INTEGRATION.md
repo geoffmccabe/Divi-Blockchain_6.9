@@ -28,11 +28,20 @@ Every overlay record shares the **DVXP envelope** inside the OP_META push:
 
 ```
 scriptPubKey = OP_META(0x6a) PUSH(payload)
-payload = "DVXP"(4 = 44 56 58 50) | version(1=0x01) | type(1) | subtype(1) | body
+payload = "DVXP"(4 = 44 56 58 50) | version(1=0x01) | type(1) | body
 ```
 
-Types: `0x01` PoE · `0x02` **NFD** · `0x03` PoE-batch · `0x04` DMT tokens. Rules:
-unknown **version** → halt (don't guess); unknown type/subtype/malformed →
+Types: `0x01` PoE · `0x02` **NFD** · `0x03` PoE-batch · `0x04` DMT tokens.
+
+> **Header is 6 bytes** (`magic|version|type`); the byte after is **type-specific**,
+> NOT a universal subtype. NFD (0x02) and DMT (0x04) put a **subtype** there; PoE
+> (0x01 / 0x03) puts **hashAlg** and distinguishes single vs batch by the *type*.
+> A generic parser must not assume a subtype byte for every type. *(The shared
+> `dvxp-core` currently hardcodes a 7-byte header with subtype — a known issue to
+> reconcile with PoE; see `docs/DVXP-INTEGRATION-GUIDE.md`, which is the canonical
+> shared-envelope guide.)*
+
+Rules: unknown **version** → halt (don't guess); unknown type/subtype/malformed →
 **ignore, never destroy** (no "burn"). Records are applied in block height, then
 tx-index order.
 
@@ -41,7 +50,7 @@ tx-index order.
 | subtype | body | fields |
 |---------|------|--------|
 | `0x01` MINT | 65, or 97 with a thumbnail | `arweave_ptr`(32) · `content_hash`(32) · `flags`(1) · `thumb_ptr`(32, only if flags bit1) |
-| `0x02` TRANSFER | 84 | `mint_txid`(32) · `new_owner`(20 = hash160) · `wrapkey_ptr`(32) |
+| `0x02` TRANSFER | 85 | `mint_txid`(32) · `new_owner`(21 = shared packed addr) · `wrapkey_ptr`(32) |
 | `0x03` KEY-ANNOUNCE | 32 | `enc_pubkey`(32 = X25519) |
 
 - **flags**: bit0 `0x01` = encrypted · bit1 `0x02` = has public thumbnail.

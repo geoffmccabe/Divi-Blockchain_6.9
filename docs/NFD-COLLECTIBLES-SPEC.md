@@ -74,10 +74,10 @@ Default in the wallet is on, but it is always the creator's decision per mint.
 | field         | size | meaning                                              |
 |---------------|------|------------------------------------------------------|
 | mint_txid     | 32   | which NFD this transfers (the mint tx id)            |
-| new_owner     | 20   | recipient (Divi address hash160)                     |
+| new_owner     | 21   | recipient — shared packed address (kind + hash160)   |
 | wrapkey_ptr   | 32   | Arweave tx id of the content-key re-wrapped to recipient |
 
-84-byte body. **Authorization:** the transfer tx must be *signed by the current
+85-byte body. **Authorization:** the transfer tx must be *signed by the current
 owner* — enforced by requiring an input spending a coin the current owner
 controls, or (v1) an attached `signmessage` proof over `mint_txid|new_owner`.
 The indexer replays mint→transfer→transfer… to compute the current owner.
