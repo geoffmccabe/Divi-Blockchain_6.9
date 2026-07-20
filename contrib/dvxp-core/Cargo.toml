@@ -1,0 +1,13 @@
+[package]
+name = "dvxp-core"
+version = "0.1.0"
+edition = "2021"
+description = "Shared DVXP record envelope, codecs, and indexer framework for Divi overlay protocols (PoE 0x01, NFD 0x02, PoE-batch 0x03, DMT 0x04, and future record classes). One classifier, one skip/halt model, one fingerprint — so independent indexers cannot diverge."
+license = "MIT"
+
+[dependencies]
+sha2 = "0.10"
+
+[lib]
+name = "dvxp_core"
+path = "src/lib.rs"
