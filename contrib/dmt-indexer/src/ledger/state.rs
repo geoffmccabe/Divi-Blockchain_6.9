@@ -102,6 +102,19 @@ pub struct CommitState {
     pub height: u64,
 }
 
+/// One recorded before-image, replayed in reverse to undo a block (spec §9.4).
+///
+/// Storing the *previous* value rather than an inverse operation means undo is
+/// exact even for saturating or clamped arithmetic, where "subtract what you
+/// added" would not reliably restore the original.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Undo {
+    Balance { key: ((u64, u32), AddrKey), prev: Option<u64> },
+    Token { key: (u64, u32), prev: Option<Box<TokenState>> },
+    Ticker { name: Vec<u8>, prev: Option<TickerState> },
+    Commit { hash: [u8; 20], prev: Option<CommitState> },
+}
+
 /// The whole DMT ledger.
 #[derive(Debug, Default, Clone)]
 pub struct State {
@@ -110,6 +123,9 @@ pub struct State {
     pub tickers: BTreeMap<Vec<u8>, TickerState>,
     /// Keyed by commitment hash; removed when consumed by an ISSUE.
     pub commits: BTreeMap<[u8; 20], CommitState>,
+    /// Before-images for the block currently being applied. Recording lives
+    /// inside the mutators so a new rule cannot forget to journal its writes.
+    pending: Vec<Undo>,
 }
 
 pub fn token_key(id: TokenId) -> (u64, u32) {
@@ -136,8 +152,11 @@ impl State {
     /// "ignore the whole record" rather than wrapping.
     #[must_use]
     pub fn credit(&mut self, id: TokenId, who: Address, amount: u64) -> Option<()> {
-        let slot = self.balances.entry((token_key(id), addr_key(who))).or_insert(0);
-        *slot = slot.checked_add(amount)?;
+        let key = (token_key(id), addr_key(who));
+        let prev = self.balances.get(&key).copied();
+        let next = prev.unwrap_or(0).checked_add(amount)?;
+        self.pending.push(Undo::Balance { key, prev });
+        self.balances.insert(key, next);
         Some(())
     }
 
@@ -145,13 +164,85 @@ impl State {
     #[must_use]
     pub fn debit(&mut self, id: TokenId, who: Address, amount: u64) -> Option<()> {
         let key = (token_key(id), addr_key(who));
-        let slot = self.balances.get_mut(&key)?;
-        *slot = slot.checked_sub(amount)?;
+        let prev = self.balances.get(&key).copied()?;
+        let next = prev.checked_sub(amount)?;
+        self.pending.push(Undo::Balance { key, prev: Some(prev) });
         // Drop empty entries so the fingerprint reflects holders, not history.
-        if *slot == 0 {
+        if next == 0 {
             self.balances.remove(&key);
+        } else {
+            self.balances.insert(key, next);
         }
         Some(())
+    }
+
+    /// Record a token's current value before it is modified. Call before any
+    /// `token_mut` write, and before inserting a new token.
+    pub fn touch_token(&mut self, id: TokenId) {
+        let key = token_key(id);
+        let prev = self.tokens.get(&key).cloned().map(Box::new);
+        self.pending.push(Undo::Token { key, prev });
+    }
+
+    pub fn touch_ticker(&mut self, name: &[u8]) {
+        let prev = self.tickers.get(name).cloned();
+        self.pending.push(Undo::Ticker { name: name.to_vec(), prev });
+    }
+
+    pub fn touch_commit(&mut self, hash: [u8; 20]) {
+        let prev = self.commits.get(&hash).cloned();
+        self.pending.push(Undo::Commit { hash, prev });
+    }
+
+    /// Take the before-images recorded since the last call.
+    pub fn take_pending(&mut self) -> Vec<Undo> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// Discard before-images without applying them (used when a block is
+    /// applied and its journal is being retained elsewhere).
+    pub fn clear_pending(&mut self) {
+        self.pending.clear();
+    }
+
+    /// Replay before-images in reverse, restoring the exact prior state.
+    pub fn revert(&mut self, undo: &[Undo]) {
+        for u in undo.iter().rev() {
+            match u {
+                Undo::Balance { key, prev } => match prev {
+                    Some(v) => {
+                        self.balances.insert(*key, *v);
+                    }
+                    None => {
+                        self.balances.remove(key);
+                    }
+                },
+                Undo::Token { key, prev } => match prev {
+                    Some(v) => {
+                        self.tokens.insert(*key, (**v).clone());
+                    }
+                    None => {
+                        self.tokens.remove(key);
+                    }
+                },
+                Undo::Ticker { name, prev } => match prev {
+                    Some(v) => {
+                        self.tickers.insert(name.clone(), v.clone());
+                    }
+                    None => {
+                        self.tickers.remove(name);
+                    }
+                },
+                Undo::Commit { hash, prev } => match prev {
+                    Some(v) => {
+                        self.commits.insert(*hash, v.clone());
+                    }
+                    None => {
+                        self.commits.remove(hash);
+                    }
+                },
+            }
+        }
     }
 
     /// Holders of a token, in deterministic order.

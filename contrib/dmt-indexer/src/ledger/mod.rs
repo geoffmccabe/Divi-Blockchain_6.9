@@ -14,6 +14,9 @@
 //! [`Ledger::apply_mint`] — partial application elsewhere is how Counterparty
 //! and Omni ended up with balances their own implementations disagreed about.
 
+pub mod reorg;
+#[cfg(test)]
+pub mod tests_support;
 pub mod state;
 
 use crate::config;
@@ -153,6 +156,7 @@ impl Ledger {
         };
 
         // ---- validated; mutate from here --------------------------------
+        self.state.touch_token(id);
         let token = TokenState::from_issue(r, ctx.sender);
         if r.premine > 0 {
             self.state
@@ -162,6 +166,8 @@ impl Ledger {
         self.state.tokens.insert(state::token_key(id), token);
 
         if let Some(c) = commitment {
+            self.state.touch_commit(c);
+            self.state.touch_ticker(&r.ticker);
             self.state.commits.remove(&c);
             self.state.tickers.insert(
                 r.ticker.clone(),
@@ -273,6 +279,7 @@ impl Ledger {
         self.state
             .credit(r.token, to, amount)
             .ok_or(Ignored::RuleViolation("recipient balance overflows"))?;
+        self.state.touch_token(r.token);
         let t = self.state.token_mut(r.token).expect("checked above");
         t.minted = t.minted.saturating_add(amount);
         t.circulating = t.circulating.saturating_add(amount);
@@ -288,6 +295,7 @@ impl Ledger {
         if self.state.commits.contains_key(&r.commitment) {
             return Err(Ignored::RuleViolation("commitment already published"));
         }
+        self.state.touch_commit(r.commitment);
         self.state.commits.insert(
             r.commitment,
             CommitState { committer: ctx.sender, height: ctx.height },
@@ -307,6 +315,7 @@ impl Ledger {
         self.state
             .debit(r.token, ctx.sender, r.amount)
             .ok_or(Ignored::RuleViolation("insufficient balance"))?;
+        self.state.touch_token(r.token);
         let t = self.state.token_mut(r.token).expect("checked above");
         t.circulating = t.circulating.saturating_sub(r.amount);
         Ok(())
@@ -317,12 +326,13 @@ impl Ledger {
     fn apply_lock_supply(&mut self, r: &simple::TokenRef, ctx: &TxContext) -> Result<(), Ignored> {
         let t = self
             .state
-            .token_mut(r.token)
+            .token(r.token)
             .ok_or(Ignored::RuleViolation("unknown token"))?;
         if addr_key(t.issuer) != addr_key(ctx.sender) {
             return Err(Ignored::RuleViolation("only the issuer may lock supply"));
         }
-        t.supply_locked = true;
+        self.state.touch_token(r.token);
+        self.state.token_mut(r.token).expect("checked above").supply_locked = true;
         Ok(())
     }
 
@@ -333,16 +343,19 @@ impl Ledger {
     ) -> Result<(), Ignored> {
         let t = self
             .state
-            .token_mut(r.token)
+            .token(r.token)
             .ok_or(Ignored::RuleViolation("unknown token"))?;
         if addr_key(t.issuer) != addr_key(ctx.sender) {
             return Err(Ignored::RuleViolation("only the issuer may transfer issuership"));
         }
-        t.issuer = r.new_issuer;
+        let ticker = t.ticker.clone();
+
+        self.state.touch_token(r.token);
+        self.state.token_mut(r.token).expect("checked above").issuer = r.new_issuer;
         // The ticker travels with the token -- that is the supported way to sell
         // a live token's identity (spec §7.5).
-        let ticker = t.ticker.clone();
         if !ticker.is_empty() {
+            self.state.touch_ticker(&ticker);
             if let Some(ts) = self.state.tickers.get_mut(&ticker) {
                 ts.owner = r.new_issuer;
             }
@@ -358,7 +371,7 @@ impl Ledger {
         let ts = self
             .state
             .tickers
-            .get_mut(&r.ticker)
+            .get(&r.ticker)
             .ok_or(Ignored::RuleViolation("ticker not registered"))?;
         if addr_key(ts.owner) != addr_key(ctx.sender) {
             return Err(Ignored::RuleViolation("only the owner may transfer a ticker"));
@@ -369,7 +382,12 @@ impl Ledger {
         if ts.is_bound() {
             return Err(Ignored::RuleViolation("ticker is bound to a live token"));
         }
-        ts.owner = r.new_owner;
+        self.state.touch_ticker(&r.ticker);
+        self.state
+            .tickers
+            .get_mut(&r.ticker)
+            .expect("checked above")
+            .owner = r.new_owner;
         Ok(())
     }
 }
