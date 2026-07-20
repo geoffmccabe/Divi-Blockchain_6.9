@@ -41,7 +41,8 @@ pub struct Issue {
     pub flags: u8,
     pub decimals: u8,
     pub ticker: Vec<u8>,
-    pub salt: [u8; SALT_LEN],
+    /// Present only when a ticker is claimed (spec §7.2).
+    pub salt: Option<[u8; SALT_LEN]>,
     pub premine: u64,
     pub terms: Option<MintTerms>,
     pub metadata_ptr: Option<[u8; METADATA_PTR_LEN]>,
@@ -50,6 +51,10 @@ pub struct Issue {
 impl Issue {
     pub fn has(&self, flag: u8) -> bool {
         self.flags & flag != 0
+    }
+    /// A token may exist with no human-readable name at all.
+    pub fn has_ticker(&self) -> bool {
+        !self.ticker.is_empty()
     }
     pub fn is_open_mint(&self) -> bool {
         self.has(FLAG_OPEN_MINT)
@@ -88,15 +93,23 @@ pub fn parse(body: &[u8]) -> Result<Issue, Ignored> {
         return Err(Ignored::RuleViolation("decimals out of range"));
     }
 
+    // A ticker is OPTIONAL and separately priced (spec §7.3.1): a token always
+    // has a canonical numeric id and works without a human-readable name.
+    // ticker_len = 0 means "no ticker", and the commit-reveal salt is then
+    // absent too, since there is no name to have committed to.
     let ticker_len = c.read_u8().map_err(malformed)? as usize;
-    let ticker = c.read_bytes(ticker_len).map_err(malformed)?.to_vec();
-    ticker::validate(&ticker).map_err(|e| match e {
-        ticker::TickerError::Reserved => Ignored::RuleViolation("reserved ticker"),
-        _ => Ignored::RuleViolation("invalid ticker"),
-    })?;
-
-    let mut salt = [0u8; SALT_LEN];
-    salt.copy_from_slice(c.read_bytes(SALT_LEN).map_err(malformed)?);
+    let (ticker, salt) = if ticker_len == 0 {
+        (Vec::new(), None)
+    } else {
+        let t = c.read_bytes(ticker_len).map_err(malformed)?.to_vec();
+        ticker::validate(&t).map_err(|e| match e {
+            ticker::TickerError::Reserved => Ignored::RuleViolation("reserved ticker"),
+            _ => Ignored::RuleViolation("invalid ticker"),
+        })?;
+        let mut s = [0u8; SALT_LEN];
+        s.copy_from_slice(c.read_bytes(SALT_LEN).map_err(malformed)?);
+        (t, Some(s))
+    };
 
     let premine = c.read_varint().map_err(malformed)?;
 
@@ -175,8 +188,10 @@ mod tests {
     impl Build {
         fn bytes(&self) -> Vec<u8> {
             let mut v = vec![self.flags, self.decimals, self.ticker.len() as u8];
-            v.extend_from_slice(&self.ticker);
-            v.extend_from_slice(&[0x11u8; SALT_LEN]);
+            if !self.ticker.is_empty() {
+                v.extend_from_slice(&self.ticker);
+                v.extend_from_slice(&[0x11u8; SALT_LEN]);
+            }
             write_varint(&mut v, self.premine);
             if let Some((cap, per, hs, he, price, step)) = self.terms {
                 for n in [cap, per, hs, he, price] {

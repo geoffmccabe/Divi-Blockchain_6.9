@@ -40,7 +40,9 @@
 //!
 //! Adding a new record type is a local change — see [`record`].
 
+pub mod config;
 pub mod fees;
+pub mod ledger;
 pub mod record;
 pub mod ticker;
 
