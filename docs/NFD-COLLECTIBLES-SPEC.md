@@ -58,6 +58,18 @@ encrypted (only the owner unlocks it — §3). The wallet downscales it locally 
 Arweave id is content-derived, `thumb_ptr` already pins the exact preview bytes.
 Default in the wallet is on, but it is always the creator's decision per mint.
 
+**Two honesty notes (state plainly in UI + marketing):**
+1. *A preview reveals a low-resolution version publicly.* For an image, a ≤500px
+   copy is often "the content" at low quality — so the accurate claim is that the
+   **full-quality original** stays private, not that the content is invisible.
+2. *The preview is NOT cryptographically bound to the encrypted content.*
+   `thumb_ptr` is an independent object; nothing on-chain forces it to match what
+   `content_hash` covers. A creator could show one preview and encrypt something
+   else. Binding is impractical (downscaling isn't canonical), so **buyers /
+   recipients / marketplaces must treat a preview as the creator's claim, never
+   proof of the underlying content.** Authenticity of the *encrypted* content is
+   still enforced on unlock (§3); the preview is not.
+
 ### subtype `0x02` — TRANSFER
 | field         | size | meaning                                              |
 |---------------|------|------------------------------------------------------|

@@ -74,6 +74,12 @@ impl NfdLedger {
         if !c.is_empty() {
             return Err(Ignored::TrailingBytes);
         }
+        // The id is the mint txid; one OP_META record per tx is relay policy, not
+        // consensus, so refuse a second mint under the same txid rather than let
+        // it silently overwrite the first (deterministic + safe).
+        if self.nfds.contains_key(&ctx.txid) {
+            return Err(Ignored::RuleViolation("duplicate mint id for this tx"));
+        }
         let owner = Self::sender(ctx)?;
         self.nfds.insert(
             ctx.txid,
@@ -208,6 +214,15 @@ mod tests {
         // the owner can
         l.apply(&rec(SUB_TRANSFER, &tbody), &ctx(2, Some(addr(7)))).unwrap();
         assert_eq!(l.owner_of(&[1; 32]), Some([9; 20]));
+    }
+
+    #[test]
+    fn duplicate_mint_id_does_not_overwrite() {
+        let mut l = NfdLedger::new();
+        l.apply(&rec(SUB_MINT, &mint_body(false)), &ctx(1, Some(addr(7)))).unwrap();
+        // a second mint record under the SAME txid is rejected, not applied
+        assert!(l.apply(&rec(SUB_MINT, &mint_body(true)), &ctx(1, Some(addr(9)))).is_err());
+        assert_eq!(l.owner_of(&[1; 32]), Some([7; 20]));
     }
 
     #[test]
