@@ -5,10 +5,10 @@
 //! should move to its own module.
 
 use super::{ensure_drained, malformed, read_address, read_token_id, TokenId};
-use crate::address::Address;
-use crate::envelope::Ignored;
+use dvxp_core::codec::Address;
+use dvxp_core::Ignored;
 use crate::ticker;
-use crate::varint::Cursor;
+use dvxp_core::varint::Cursor;
 
 pub const COMMITMENT_LEN: usize = 20;
 
@@ -110,7 +110,7 @@ pub fn parse_ticker_transfer(body: &[u8]) -> Result<TickerTransfer, Ignored> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::varint::encode_varint;
+    use dvxp_core::varint::write_varint;
 
     fn addr_bytes() -> Vec<u8> {
         let mut v = vec![0x00];
@@ -120,8 +120,8 @@ mod tests {
 
     fn token_bytes(block: u64, idx: u32) -> Vec<u8> {
         let mut v = Vec::new();
-        encode_varint(block, &mut v);
-        encode_varint(idx as u64, &mut v);
+        write_varint(&mut v, block);
+        write_varint(&mut v, idx as u64);
         v
     }
 
@@ -129,7 +129,7 @@ mod tests {
     fn mint_recipient_is_optional() {
         let bare = token_bytes(10, 1);
         let m = parse_mint(&bare).unwrap();
-        assert_eq!(m.token, TokenId { block: 10, tx_index: 1 });
+        assert_eq!(m.token, TokenId { height: 10, tx_index: 1 });
         assert!(m.recipient.is_none(), "absent recipient means credit the sender");
 
         let mut with = token_bytes(10, 1);
@@ -153,11 +153,11 @@ mod tests {
     #[test]
     fn burn_rejects_zero() {
         let mut v = token_bytes(3, 0);
-        encode_varint(0, &mut v);
+        write_varint(&mut v, 0);
         assert!(matches!(parse_burn(&v), Err(Ignored::RuleViolation(_))));
 
         let mut ok = token_bytes(3, 0);
-        encode_varint(42, &mut ok);
+        write_varint(&mut ok, 42);
         assert_eq!(parse_burn(&ok).unwrap().amount, 42);
     }
 
@@ -165,14 +165,14 @@ mod tests {
     fn lock_supply_and_issuer_transfer_roundtrip() {
         assert_eq!(
             parse_lock_supply(&token_bytes(9, 4)).unwrap().token,
-            TokenId { block: 9, tx_index: 4 }
+            TokenId { height: 9, tx_index: 4 }
         );
 
         let mut v = token_bytes(9, 4);
         v.extend_from_slice(&addr_bytes());
         let it = parse_issuer_transfer(&v).unwrap();
-        assert_eq!(it.token, TokenId { block: 9, tx_index: 4 });
-        assert_eq!(it.new_issuer.hash, [0x77; 20]);
+        assert_eq!(it.token, TokenId { height: 9, tx_index: 4 });
+        assert_eq!(it.new_issuer.hash160, [0x77; 20]);
         // Missing the address is truncation.
         assert!(parse_issuer_transfer(&token_bytes(9, 4)).is_err());
     }

@@ -5,10 +5,10 @@
 //! if the same transfer could be written two ways, two implementations could
 //! disagree about which is valid.
 
-use super::{ensure_drained, malformed, read_address, TokenId};
-use crate::address::Address;
-use crate::envelope::Ignored;
-use crate::varint::Cursor;
+use super::{ensure_drained, malformed, order_key, read_address, TokenId};
+use dvxp_core::codec::Address;
+use dvxp_core::Ignored;
+use dvxp_core::varint::Cursor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Payout {
@@ -55,16 +55,20 @@ pub fn parse(body: &[u8]) -> Result<Transfer, Ignored> {
     for _ in 0..group_count {
         // Block is a delta from the previous group's block.
         let delta = c.read_varint().map_err(malformed)?;
-        let tx_index = c.read_varint_u32().map_err(malformed)?;
-        let block = match prev {
+        let tx_index = u32::try_from(c.read_varint().map_err(malformed)?)
+            .map_err(|_| Ignored::Malformed("tx index out of range"))?;
+        let height = match prev {
             None => delta,
-            Some(p) => p.block.checked_add(delta).ok_or(Ignored::Malformed("block delta overflow"))?,
+            Some(p) => p
+                .height
+                .checked_add(delta)
+                .ok_or(Ignored::Malformed("block delta overflow"))?,
         };
-        let token = TokenId { block, tx_index };
+        let token = TokenId { height, tx_index };
 
-        // Strictly ascending. Equal blocks require a strictly greater index.
+        // Strictly ascending. Equal heights require a strictly greater index.
         if let Some(p) = prev {
-            if token <= p {
+            if order_key(token) <= order_key(p) {
                 return Err(Ignored::RuleViolation("groups not in ascending token order"));
             }
         }
@@ -94,8 +98,8 @@ pub fn parse(body: &[u8]) -> Result<Transfer, Ignored> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::address::PACKED_LEN;
-    use crate::varint::encode_varint;
+    use dvxp_core::codec::ADDRESS_LEN;
+    use dvxp_core::varint::write_varint;
 
     fn addr(tag: u8) -> Vec<u8> {
         let mut v = vec![0x00];
@@ -108,13 +112,13 @@ mod tests {
 
     fn build(groups: &[Spec]) -> Vec<u8> {
         let mut v = Vec::new();
-        encode_varint(groups.len() as u64, &mut v);
+        write_varint(&mut v, groups.len() as u64);
         for (delta, idx, payouts) in groups {
-            encode_varint(*delta, &mut v);
-            encode_varint(*idx as u64, &mut v);
-            encode_varint(payouts.len() as u64, &mut v);
+            write_varint(&mut v, *delta);
+            write_varint(&mut v, *idx as u64);
+            write_varint(&mut v, payouts.len() as u64);
             for (amount, tag) in payouts {
-                encode_varint(*amount, &mut v);
+                write_varint(&mut v, *amount);
                 v.extend_from_slice(&addr(*tag));
             }
         }
@@ -126,7 +130,7 @@ mod tests {
         let raw = build(&[(100, 2, vec![(500, 0xaa)])]);
         let t = parse(&raw).unwrap();
         assert_eq!(t.groups.len(), 1);
-        assert_eq!(t.groups[0].token, TokenId { block: 100, tx_index: 2 });
+        assert_eq!(t.groups[0].token, TokenId { height: 100, tx_index: 2 });
         assert_eq!(t.groups[0].payouts[0].amount, 500);
     }
 
@@ -136,7 +140,7 @@ mod tests {
         let raw = build(&[(50, 1, payouts)]);
         let t = parse(&raw).unwrap();
         assert_eq!(t.groups[0].payouts.len(), 20);
-        assert_eq!(t.total_for(TokenId { block: 50, tx_index: 1 }), Some((10..30).sum()));
+        assert_eq!(t.total_for(TokenId { height: 50, tx_index: 1 }), Some((10..30).sum()));
         // An airdrop of 20 fits comfortably inside the ~592-byte body budget.
         assert!(raw.len() < 592, "airdrop body was {} bytes", raw.len());
     }
@@ -146,10 +150,10 @@ mod tests {
         let raw = build(&[(100, 0, vec![(1, 1)]), (50, 0, vec![(2, 2)]), (0, 7, vec![(3, 3)])]);
         let t = parse(&raw).unwrap();
         let ids: Vec<TokenId> = t.groups.iter().map(|g| g.token).collect();
-        assert_eq!(ids[0], TokenId { block: 100, tx_index: 0 });
-        assert_eq!(ids[1], TokenId { block: 150, tx_index: 0 });
+        assert_eq!(ids[0], TokenId { height: 100, tx_index: 0 });
+        assert_eq!(ids[1], TokenId { height: 150, tx_index: 0 });
         // Zero delta stays in the same block; index must advance.
-        assert_eq!(ids[2], TokenId { block: 150, tx_index: 7 });
+        assert_eq!(ids[2], TokenId { height: 150, tx_index: 7 });
     }
 
     #[test]
@@ -177,10 +181,10 @@ mod tests {
         let mut extra = raw.clone();
         extra.push(0);
         assert_eq!(parse(&extra), Err(Ignored::TrailingBytes));
-        assert!(parse(&raw[..raw.len() - PACKED_LEN]).is_err());
+        assert!(parse(&raw[..raw.len() - ADDRESS_LEN]).is_err());
         // A huge declared count must not allocate or panic -- it truncates.
         let mut lying = Vec::new();
-        encode_varint(u64::MAX, &mut lying);
+        write_varint(&mut lying, u64::MAX);
         assert!(parse(&lying).is_err());
     }
 
@@ -188,6 +192,6 @@ mod tests {
     fn total_for_reports_overflow_rather_than_wrapping() {
         let raw = build(&[(1, 0, vec![(u64::MAX, 1), (2, 2)])]);
         let t = parse(&raw).unwrap();
-        assert_eq!(t.total_for(TokenId { block: 1, tx_index: 0 }), None);
+        assert_eq!(t.total_for(TokenId { height: 1, tx_index: 0 }), None);
     }
 }

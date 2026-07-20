@@ -1,25 +1,28 @@
-//! Record types and subtype dispatch (spec §5).
+//! DMT record types and subtype dispatch (spec §5).
+//!
+//! The envelope, varints, addresses and object ids all come from `dvxp-core`,
+//! which PoE, NFD and DMT share. That sharing is the point: one classifier and
+//! one set of codecs means two indexers cannot disagree about what a record
+//! *is* — only about what it *means*, and the meaning lives here.
 //!
 //! ## Adding a new record type later
 //!
-//! This layer is deliberately shaped so a new idea is a local change:
-//!   1. add a `SUB_*` constant below,
-//!   2. add a variant to `Record`,
+//!   1. add a `SUB_*` constant,
+//!   2. add a variant to [`Record`],
 //!   3. write `parse` in its own module,
-//!   4. add one arm to the `match` in `Record::parse`.
+//!   4. add one arm to the `match` in [`Record::parse`].
 //!
-//! Nothing else in the indexer needs editing to *parse* a new record. Applying
-//! it to state is a separate, equally local change in `ledger`. Per spec §8, a
-//! new subtype also requires a version bump and a published activation height --
-//! it must never appear silently, or two indexers will disagree.
+//! Nothing else in the parser changes. Per spec §8, a new subtype also needs a
+//! version bump and a published activation height — it must never appear
+//! silently, or two indexers will disagree.
 
 pub mod issue;
 pub mod simple;
 pub mod transfer;
 
-use crate::address::Address;
-use crate::envelope::{Envelope, Ignored};
-use crate::varint::{Cursor, VarintError};
+use dvxp_core::codec::{Address, ObjectId};
+use dvxp_core::varint::{Cursor, VarintError};
+use dvxp_core::Ignored;
 
 pub const SUB_ISSUE: u8 = 0x01;
 pub const SUB_TRANSFER: u8 = 0x02;
@@ -31,16 +34,15 @@ pub const SUB_ISSUER_TRANSFER: u8 = 0x07;
 pub const SUB_TICKER_TRANSFER: u8 = 0x08;
 
 /// A token's permanent identity: where its ISSUE was mined (spec §4.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TokenId {
-    pub block: u64,
-    pub tx_index: u32,
-}
+/// Shared with every other DVXP protocol, so a token and an NFD are named the
+/// same way.
+pub type TokenId = ObjectId;
 
-impl TokenId {
-    pub fn to_hex(self) -> String {
-        format!("{:x}:{:x}", self.block, self.tx_index)
-    }
+/// Sort key for canonical group ordering. `ObjectId` is deliberately not `Ord`
+/// in the shared crate, so the comparison is spelled out once here rather than
+/// re-derived (differently) in each protocol.
+pub(crate) fn order_key(id: TokenId) -> (u64, u32) {
+    (id.height, id.tx_index)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,20 +58,18 @@ pub enum Record {
 }
 
 impl Record {
-    pub fn parse(env: &Envelope<'_>) -> Result<Record, Ignored> {
-        match env.subtype {
-            SUB_ISSUE => issue::parse(env.body).map(Record::Issue),
-            SUB_TRANSFER => transfer::parse(env.body).map(Record::Transfer),
-            SUB_MINT => simple::parse_mint(env.body).map(Record::Mint),
-            SUB_NAME_COMMIT => simple::parse_name_commit(env.body).map(Record::NameCommit),
-            SUB_BURN => simple::parse_burn(env.body).map(Record::Burn),
-            SUB_LOCK_SUPPLY => simple::parse_lock_supply(env.body).map(Record::LockSupply),
-            SUB_ISSUER_TRANSFER => {
-                simple::parse_issuer_transfer(env.body).map(Record::IssuerTransfer)
-            }
-            SUB_TICKER_TRANSFER => {
-                simple::parse_ticker_transfer(env.body).map(Record::TickerTransfer)
-            }
+    /// Parse a DMT body. The caller has already established that this is a
+    /// well-formed DVXP envelope of a supported version, of type `TYPE_DMT`.
+    pub fn parse(subtype: u8, body: &[u8]) -> Result<Record, Ignored> {
+        match subtype {
+            SUB_ISSUE => issue::parse(body).map(Record::Issue),
+            SUB_TRANSFER => transfer::parse(body).map(Record::Transfer),
+            SUB_MINT => simple::parse_mint(body).map(Record::Mint),
+            SUB_NAME_COMMIT => simple::parse_name_commit(body).map(Record::NameCommit),
+            SUB_BURN => simple::parse_burn(body).map(Record::Burn),
+            SUB_LOCK_SUPPLY => simple::parse_lock_supply(body).map(Record::LockSupply),
+            SUB_ISSUER_TRANSFER => simple::parse_issuer_transfer(body).map(Record::IssuerTransfer),
+            SUB_TICKER_TRANSFER => simple::parse_ticker_transfer(body).map(Record::TickerTransfer),
             other => Err(Ignored::UnknownSubtype(other)),
         }
     }
@@ -82,16 +82,11 @@ pub(crate) fn malformed(_e: VarintError) -> Ignored {
 }
 
 pub(crate) fn read_token_id(c: &mut Cursor<'_>) -> Result<TokenId, Ignored> {
-    let block = c.read_varint().map_err(malformed)?;
-    let tx_index = c.read_varint_u32().map_err(malformed)?;
-    Ok(TokenId { block, tx_index })
+    ObjectId::read(c).map_err(malformed)
 }
 
 pub(crate) fn read_address(c: &mut Cursor<'_>) -> Result<Address, Ignored> {
-    let bytes = c
-        .read_bytes(crate::address::PACKED_LEN)
-        .map_err(malformed)?;
-    Address::parse(bytes).map_err(|_| Ignored::Malformed("bad packed address"))
+    Address::read(c).map_err(malformed)
 }
 
 /// Every record must consume its body exactly. Trailing bytes are ignored
@@ -107,27 +102,21 @@ pub(crate) fn ensure_drained(c: &Cursor<'_>) -> Result<(), Ignored> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::envelope;
-
-    fn env(subtype: u8, body: &[u8]) -> Vec<u8> {
-        let mut v = envelope::MAGIC.to_vec();
-        v.extend_from_slice(&[envelope::SUPPORTED_VERSION, envelope::TYPE_DMT, subtype]);
-        v.extend_from_slice(body);
-        v
-    }
 
     #[test]
     fn unknown_subtype_is_ignored_not_fatal() {
         for sub in [0x00u8, 0x09, 0x7f, 0xff] {
-            let raw = env(sub, &[]);
-            let e = envelope::classify(&raw).unwrap().unwrap();
-            assert_eq!(Record::parse(&e), Err(Ignored::UnknownSubtype(sub)));
+            assert_eq!(Record::parse(sub, &[]), Err(Ignored::UnknownSubtype(sub)));
         }
     }
 
     #[test]
-    fn token_id_hex_is_stable() {
-        let id = TokenId { block: 255, tx_index: 16 };
-        assert_eq!(id.to_hex(), "ff:10");
+    fn order_key_sorts_by_height_then_index() {
+        let a = order_key(TokenId { height: 1, tx_index: 9 });
+        let b = order_key(TokenId { height: 2, tx_index: 0 });
+        let c = order_key(TokenId { height: 1, tx_index: 10 });
+        assert!(a < b);
+        assert!(a < c);
+        assert!(c < b);
     }
 }

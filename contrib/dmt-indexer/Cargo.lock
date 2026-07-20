@@ -50,6 +50,13 @@ dependencies = [
 name = "dmt-indexer"
 version = "0.1.0"
 dependencies = [
+ "dvxp-core",
+]
+
+[[package]]
+name = "dvxp-core"
+version = "0.1.0"
+dependencies = [
  "sha2",
 ]
 

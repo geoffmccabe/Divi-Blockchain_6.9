@@ -6,7 +6,7 @@ description = "Reference indexer for Divi Meta Tokens (DMT). Normative implement
 license = "MIT"
 
 [dependencies]
-sha2 = "0.10"
+dvxp-core = { path = "../dvxp-core" }
 
 [dev-dependencies]
 

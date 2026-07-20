@@ -1,9 +1,9 @@
 //! ISSUE (subtype 0x01) -- create a token (spec §5.1, §6).
 
 use super::{ensure_drained, malformed};
-use crate::envelope::Ignored;
+use dvxp_core::Ignored;
 use crate::ticker;
-use crate::varint::Cursor;
+use dvxp_core::varint::Cursor;
 
 pub const FLAG_OPEN_MINT: u8 = 0x01;
 pub const FLAG_SUPPLY_LOCKED: u8 = 0x02;
@@ -148,7 +148,7 @@ pub fn parse(body: &[u8]) -> Result<Issue, Ignored> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::varint::encode_varint;
+    use dvxp_core::varint::write_varint;
 
     struct Build {
         flags: u8,
@@ -177,13 +177,13 @@ mod tests {
             let mut v = vec![self.flags, self.decimals, self.ticker.len() as u8];
             v.extend_from_slice(&self.ticker);
             v.extend_from_slice(&[0x11u8; SALT_LEN]);
-            encode_varint(self.premine, &mut v);
+            write_varint(&mut v, self.premine);
             if let Some((cap, per, hs, he, price, step)) = self.terms {
                 for n in [cap, per, hs, he, price] {
-                    encode_varint(n, &mut v);
+                    write_varint(&mut v, n);
                 }
                 if self.flags & FLAG_RISING_PRICE != 0 {
-                    encode_varint(step, &mut v);
+                    write_varint(&mut v, step);
                 }
             }
             if self.metadata {
