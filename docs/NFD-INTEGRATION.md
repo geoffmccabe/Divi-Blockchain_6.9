@@ -109,14 +109,15 @@ AES-256-GCM under a random key that's ECIES-wrapped to the owner. Full detail in
 ## Roadmap (what to build against)
 
 - **Done (forkless v1):** mint, view/decrypt, transfer (address→address),
-  optional public thumbnail, treasury fees, and the **collections** on-chain
-  format + indexer (creator-only, capped, ERC-721-style public traits). Proven
-  end-to-end on regtest.
-- **Next:** the wallet-side **collection builder flow + UI** (create a collection,
-  mint into it with traits, browse a collection with rarity), and a shared **chain
-  scanner** (in `dvxp-core`) for automatic discovery/enumeration — turns transfers
-  from a code-handoff into "enter address, send," and powers explorers without
-  each running a full indexer.
+  optional public thumbnail, treasury fees, and the full **collections** feature
+  — on-chain format + indexer (creator-only, capped, ERC-721-style public traits)
+  AND the wallet builder UI (create a collection, mint into it with traits, browse
+  a collection with trait rarity). Proven end-to-end on regtest.
+- **Next:** a shared **chain scanner** (in `dvxp-core`) for automatic
+  discovery/enumeration — turns transfers from a code-handoff into "enter address,
+  send," powers explorers without each running a full indexer, and makes the
+  collection view show ALL items (not just this wallet's). Gated on the `dvxp-core`
+  6-vs-7-byte header reconciliation (co-owned with the DMT/chain agents).
 - **Later — Marketplace + Builder (planned):** an **identical** NFD marketplace +
   builder will ship in **DD69 first, then be ported to the divi.love website**.
   Build the UI portably (shared React) so the two stay identical. It's built on
