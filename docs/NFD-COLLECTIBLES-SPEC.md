@@ -114,12 +114,39 @@ like ERC-721), while the **full-quality original stays encrypted** for the owner
 - **Public metadata (unencrypted, on Arweave), ERC-721 schema:**
   - *Collection* (`meta_ptr`): `{ name, description, image, external_url? }`
     (image = banner).
-  - *Per-item traits* (`traits_ptr`): `{ name?, description?, image?, attributes:
-    [{ trait_type, value, display_type? }] }`. `image` here = the public preview.
-- **Rarity** is NOT stored on-chain — it's derived by explorers/marketplaces from
-  the trait distribution across the collection (standard ERC-721 practice).
+  - *Per-item traits* (`traits_ptr`) — **LOCKED schema (Geoff, 2026-Jul-21):**
+    ```json
+    {
+      "name":    "Divi Genesis #17",
+      "edition": 17,
+      "tier":    "Legendary",
+      "attributes": [
+        { "trait_type": "Background", "value": "Nebula" },
+        { "trait_type": "Aura", "value": "Gold" }
+      ]
+    }
+    ```
+    `edition` = 1-based index within the set (stable id). `tier` = an **explicit
+    creator-assigned rarity tier** (string). Optional `image`/`description` may be
+    added. This shape is baked into every mint, so it is fixed before a set is
+    produced.
+- **Rarity is EXPLICIT (tier), not derived.** For curated, deliberately-weighted
+  sets (e.g. the 240-piece Lovenode reward collection where some are far rarer),
+  the creator assigns each item's `tier` and it is authoritative. Marketplaces may
+  ALSO derive trait-frequency rarity from `attributes` as a secondary signal, but
+  `tier` is the primary display.
 - The encrypted original + `content_hash` authenticity are unchanged (§3); the
   public traits are the creator's claim, same caveat as the preview.
+
+**More locked decisions (Geoff, 2026-Jul-21):**
+- **Reward-set exhaustion → repeats allowed.** The 240-piece Lovenode reward set
+  is pre-minted to a treasury and transferred on wins. After all 240 are
+  distributed, wins keep dropping — winners may receive **duplicate editions** of
+  existing designs (fresh mints, same art/tier). 1-of-1 uniqueness is
+  intentionally not preserved past exhaustion; the reward loop never stops.
+- **Marketplace fee → small % to treasury, configurable, may start at 0%.** Sale
+  fees reuse the existing treasury/fee infra (Payouts panel), same mechanism as
+  the mint fee — a percentage of sale price routed to the treasury address.
 
 ---
 
