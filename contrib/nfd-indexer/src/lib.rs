@@ -11,8 +11,10 @@
 //!
 //! Body layouts (spec §2, matching the wallet's `nfd_record.rs`):
 //!   MINT 0x01:  arweave_ptr(32) | content_hash(32) | flags(1) | [thumb_ptr(32)]
+//!               | [collection_id(32) + traits_ptr(32)]  (when flag bit2 set)
 //!   TRANSFER 0x02: mint_txid(32) | new_owner(21) | wrapkey_ptr(32)
 //!   KEY-ANNOUNCE 0x03: enc_pubkey(32)
+//!   COLLECTION-CREATE 0x04: max_supply(4, big-endian u32) | meta_ptr(32)
 
 use dvxp_core::codec::Address;
 use dvxp_core::registry::{RecordContext, RecordHandler};
@@ -130,7 +132,7 @@ impl NfdLedger {
             if col.max_supply != 0 && col.minted >= col.max_supply {
                 return Err(Ignored::RuleViolation("collection is minted out"));
             }
-            col.minted += 1;
+            col.minted = col.minted.saturating_add(1);
         }
 
         self.nfds.insert(
