@@ -184,6 +184,27 @@ Consequences:
   envelope and the address-ledger model — build one indexer with one per-block
   state fingerprint, serving both. Coordinate with the chain/DMT workstreams.
 
+## 2d. Encrypted vs Public content — the creator's choice (Geoff, 2026-Jul-24)
+
+Encryption is **optional per collection / per mint**, chosen by the creator at
+creation. `FLAG_ENCRYPTED` (flags bit0) already encodes this — set = encrypted,
+clear = public.
+
+- **Encrypted (owner-only):** the default for 1-of-1 art whose value is exclusive
+  access — content is AES-GCM-encrypted, the key wrapped to the owner (§3), and
+  re-wrapped on transfer. Only the current owner can view the original.
+- **Public (everyone can view the full art):** for sets where the art is shared
+  and not secret — e.g. **Percs**, where every Tier-N piece is the *same* artwork,
+  so encrypting it protects nothing. The full-resolution art is stored
+  **unencrypted** on Arweave; `content_hash` still binds it for authenticity;
+  ownership is still tracked on-chain and still subject to creator commissions and
+  the transfer rules. **Transfers are much lighter** — no key re-wrap, just the
+  ownership record (+ commission) — which is ideal for a launch buy-rush.
+
+The pipeline branches only at encrypt/upload (skip the crypto for public) and at
+view (fetch directly, no decrypt) and transfer (no re-wrap). Records, ownership,
+collections, commissions, and forging are identical either way. **Percs = Public.**
+
 ## 3. Crypto design (the security-critical part)
 
 ### 3a. Sign-to-derive — an encryption key from the wallet, without exposing it
