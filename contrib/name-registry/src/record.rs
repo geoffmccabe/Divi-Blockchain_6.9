@@ -92,6 +92,8 @@ pub enum RecordError {
     TrailingBytes,
     UnknownSubtype(u8),
     ValueTooLong,
+    /// Longer than the charset permits, so it cannot be length-prefixed safely.
+    NameTooLong,
 }
 
 impl From<VarintError> for RecordError {
@@ -160,9 +162,20 @@ impl NameRecord {
     }
 }
 
-fn write_name(out: &mut Vec<u8>, name: &[u8]) {
+/// ⚠ The length prefix is one byte. A caller handing over something longer than
+/// the charset allows must be refused, not silently truncated into a DIFFERENT
+/// valid-looking name: `name.len() as u8` on a 300-byte input wraps to 44 and
+/// would register something the user never asked for.
+fn write_name(out: &mut Vec<u8>, name: &[u8]) -> Result<(), RecordError> {
+    if name.is_empty() {
+        return Err(RecordError::Malformed("empty name"));
+    }
+    if name.len() > crate::charset::NAME_MAX_LEN {
+        return Err(RecordError::NameTooLong);
+    }
     out.push(name.len() as u8);
     out.extend_from_slice(name);
+    Ok(())
 }
 
 fn read_name(c: &mut Cursor) -> Result<Vec<u8>, RecordError> {
@@ -183,14 +196,17 @@ pub fn encode_body(rec: &NameRecord) -> Result<Vec<u8>, RecordError> {
                 return Err(RecordError::Malformed("salt must be 20 bytes"));
             }
             out.extend_from_slice(salt);
-            write_name(&mut out, name);
+            write_name(&mut out, name)?;
         }
         NameRecord::Transfer { name, new_owner } => {
-            write_name(&mut out, name);
+            write_name(&mut out, name)?;
             new_owner.write(&mut out);
         }
         NameRecord::SetRecord { name, entries } => {
-            write_name(&mut out, name);
+            write_name(&mut out, name)?;
+            if entries.is_empty() {
+                return Err(RecordError::Malformed("no entries"));
+            }
             for e in entries {
                 if e.value.len() > MAX_VALUE_LEN {
                     return Err(RecordError::ValueTooLong);
@@ -201,15 +217,18 @@ pub fn encode_body(rec: &NameRecord) -> Result<Vec<u8>, RecordError> {
             }
         }
         NameRecord::ClearRecord { name, keys } => {
-            write_name(&mut out, name);
+            write_name(&mut out, name)?;
+            if keys.is_empty() {
+                return Err(RecordError::Malformed("no keys"));
+            }
             out.extend_from_slice(keys);
         }
         NameRecord::SetPrimary { name }
         | NameRecord::Renew { name }
         | NameRecord::Buy { name }
-        | NameRecord::Delist { name } => write_name(&mut out, name),
+        | NameRecord::Delist { name } => write_name(&mut out, name)?,
         NameRecord::List { name, price, min_lifetime_blocks } => {
-            write_name(&mut out, name);
+            write_name(&mut out, name)?;
             write_varint(&mut out, *price);
             write_varint(&mut out, *min_lifetime_blocks);
         }
@@ -399,6 +418,37 @@ mod tests {
         p.push(5);
         p.extend_from_slice(b"GEOFF");
         assert!(matches!(decode_payload(&p), Err(RecordError::Malformed(_))));
+    }
+
+    /// A 300-byte name must be refused, not wrapped into a shorter, different,
+    /// perfectly valid-looking name by the one-byte length prefix.
+    #[test]
+    fn an_over_long_name_is_refused_not_truncated() {
+        let rec = NameRecord::SetPrimary { name: vec![b'A'; 300] };
+        assert_eq!(encode_payload(&rec), Err(RecordError::NameTooLong));
+        assert_eq!(
+            encode_payload(&NameRecord::SetPrimary { name: vec![b'A'; crate::charset::NAME_MAX_LEN] })
+                .map(|p| p.len()),
+            Ok(dvxp_core::HEADER_LEN + 1 + crate::charset::NAME_MAX_LEN)
+        );
+        assert!(matches!(
+            encode_payload(&NameRecord::SetPrimary { name: vec![] }),
+            Err(RecordError::Malformed(_))
+        ));
+    }
+
+    /// Encoding refuses what decoding refuses, so a record this build writes is
+    /// always one it can read back.
+    #[test]
+    fn empty_entry_and_key_lists_are_refused_on_encode_too() {
+        assert!(matches!(
+            encode_payload(&NameRecord::SetRecord { name: b"GEOFF".to_vec(), entries: vec![] }),
+            Err(RecordError::Malformed(_))
+        ));
+        assert!(matches!(
+            encode_payload(&NameRecord::ClearRecord { name: b"GEOFF".to_vec(), keys: vec![] }),
+            Err(RecordError::Malformed(_))
+        ));
     }
 
     #[test]
