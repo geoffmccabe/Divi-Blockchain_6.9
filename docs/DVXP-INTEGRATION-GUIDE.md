@@ -23,6 +23,8 @@ Three overlay protocols share one on-chain envelope and one indexer core:
 | 0x02 | **NFD** | Divi Collectibles, encrypted-Arweave NFTs | NFD workstream |
 | 0x03 | **PoE batch** | Merkle-batched timestamps | chain workstream |
 | 0x04 | **DMT** | **Divi Meta Tokens**, general-purpose fungible tokens | this workstream |
+| 0x05 | **Names** | Human-readable addresses / names (see `docs/DIVI-NAMES-PLAN.md`) | names workstream |
+| 0x06 | **Governance** | DAO proposals, votes, tallies (see `docs/GOVERNANCE-RECORD-FORMAT.md`) | governance workstream |
 
 **DMT is deliberately category-neutral.** It covers divisible currencies,
 indivisible units (tickets, passes, credits, licences, vouchers), and community
