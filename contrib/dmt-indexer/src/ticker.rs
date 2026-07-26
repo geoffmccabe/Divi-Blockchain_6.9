@@ -1,206 +1,69 @@
 //! Ticker charset, length, and normalised reserved-name matching (spec §7.2.1, §7.6).
 //!
-//! This is the impersonation-defence module. The rules here are protocol-level
-//! precisely because they are small, fixed, and must give byte-identical answers
-//! in every implementation.
+//! **These rules now live in the shared `name-registry` crate.** A DMT ticker is
+//! simply a short Divi Name, so there is exactly one namespace and exactly one
+//! copy of the impersonation defence (see `docs/DIVI-NAMES-PLAN.md` §1). This
+//! module is a thin adapter that pins the ticker length bound and keeps the
+//! previous public API, so nothing downstream of DMT changed.
+//!
+//! Behaviour is unchanged: 3 to 8 characters, `A-Z` `0-9` `!#^-_+.`, first
+//! character a letter, no lowercase, reserved names matched after folding
+//! lookalikes and then stripping punctuation (in that order — the step order is
+//! load-bearing, see `name_registry::charset::normalise`).
 
-/// Inclusive length bounds (spec §7.2.1).
-pub const MIN_LEN: usize = 3;
-pub const MAX_LEN: usize = 8;
+pub use name_registry::charset::{is_reserved, normalise, RESERVED};
 
-/// Allowed punctuation (spec §7.2.1).
-const PUNCT: &[u8] = b"!#^-_+.";
+use name_registry::charset::{self, NameError};
 
-/// Names nobody may register, protecting the chain's own identity (spec §7.6).
-pub const RESERVED: &[&str] = &["DIVI", "DIVIX", "DMT", "NFD", "POE"];
+/// Inclusive length bounds for a TICKER (spec §7.2.1). Human readable addresses
+/// use the same rules with a larger bound; see `name_registry::charset`.
+pub const MIN_LEN: usize = charset::MIN_LEN;
+pub const MAX_LEN: usize = charset::TICKER_MAX_LEN;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TickerError {
-    TooShort,
-    TooLong,
-    BadCharacter,
-    /// Lowercase is never valid -- case-folding is a duplicate-identity bug
-    /// source, so `DIVI` and `divi` can never become different tokens.
-    Lowercase,
-    MustStartWithLetter,
-    /// Collides with a reserved name after normalisation.
-    Reserved,
-}
-
-fn is_upper(b: u8) -> bool {
-    b.is_ascii_uppercase()
-}
-
-fn is_digit(b: u8) -> bool {
-    b.is_ascii_digit()
-}
-
-fn is_punct(b: u8) -> bool {
-    PUNCT.contains(&b)
-}
+/// Retained under its original name so DMT code and tests read unchanged.
+pub type TickerError = NameError;
 
 /// Charset and length only -- does not consult the reserved list.
 pub fn validate_charset(ticker: &[u8]) -> Result<(), TickerError> {
-    if ticker.len() < MIN_LEN {
-        return Err(TickerError::TooShort);
-    }
-    if ticker.len() > MAX_LEN {
-        return Err(TickerError::TooLong);
-    }
-    for &b in ticker {
-        if b.is_ascii_lowercase() {
-            return Err(TickerError::Lowercase);
-        }
-        if !(is_upper(b) || is_digit(b) || is_punct(b)) {
-            return Err(TickerError::BadCharacter);
-        }
-    }
-    if !is_upper(ticker[0]) {
-        return Err(TickerError::MustStartWithLetter);
-    }
-    Ok(())
-}
-
-/// Normalise for reserved-name comparison (spec §7.6).
-///
-/// **Step order is load-bearing.** `!` is both punctuation and a letter
-/// lookalike. Folding must happen BEFORE punctuation is stripped, or `D!VI`
-/// reduces to `DVI` and fails to collide with `DIVI` -- the exact impersonation
-/// this exists to stop. Reversing these two steps leaves a live hole that a
-/// naive test suite still passes.
-pub fn normalise(ticker: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(ticker.len());
-    for &b in ticker {
-        // 1. fold lookalikes to letters
-        let folded = match b {
-            b'0' => b'O',
-            b'1' | b'!' => b'I',
-            b'2' => b'Z',
-            b'5' => b'S',
-            b'8' => b'B',
-            other => other,
-        };
-        // 2. then drop any punctuation that survived folding
-        if is_punct(folded) {
-            continue;
-        }
-        out.push(folded);
-    }
-    out
-}
-
-/// True if `ticker` collides with a reserved name once normalised.
-pub fn is_reserved(ticker: &[u8]) -> bool {
-    let candidate = normalise(ticker);
-    RESERVED
-        .iter()
-        .any(|r| normalise(r.as_bytes()) == candidate)
+    charset::validate_charset_max(ticker, MAX_LEN)
 }
 
 /// Full check: charset, length, and reserved collision.
 pub fn validate(ticker: &[u8]) -> Result<(), TickerError> {
-    validate_charset(ticker)?;
-    if is_reserved(ticker) {
-        return Err(TickerError::Reserved);
-    }
-    Ok(())
+    charset::validate_ticker(ticker)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The shared crate carries the exhaustive rule tests. What matters HERE is
+    /// that DMT's own bounds did not move when the rules were hoisted out, so
+    /// these are the boundary cases specific to tickers.
     #[test]
-    fn accepts_ordinary_tickers() {
-        for t in [&b"GOLD"[..], b"ABC", b"TICKET1", b"A-B_C", b"X.Y+Z", b"ABCDEFGH"] {
-            assert!(validate(t).is_ok(), "should accept {}", String::from_utf8_lossy(t));
-        }
-    }
-
-    #[test]
-    fn enforces_length_bounds() {
+    fn ticker_length_bounds_are_unchanged() {
+        assert_eq!(MIN_LEN, 3);
+        assert_eq!(MAX_LEN, 8);
         assert_eq!(validate(b"AB"), Err(TickerError::TooShort));
-        assert_eq!(validate(b"ABCDEFGHI"), Err(TickerError::TooLong));
         assert!(validate(b"ABC").is_ok());
         assert!(validate(b"ABCDEFGH").is_ok());
+        assert_eq!(validate(b"ABCDEFGHI"), Err(TickerError::TooLong));
+    }
+
+    /// A name long enough to be a good HRA is still NOT a valid ticker. This is
+    /// the one place the two bounds could silently drift together.
+    #[test]
+    fn long_names_are_still_refused_as_tickers() {
+        assert_eq!(validate(b"GEOFFMCCABE"), Err(TickerError::TooLong));
     }
 
     #[test]
-    fn rejects_lowercase_and_foreign_characters() {
-        assert_eq!(validate(b"divi"), Err(TickerError::Lowercase));
-        assert_eq!(validate(b"GoLD"), Err(TickerError::Lowercase));
-        assert_eq!(validate(b"AB C"), Err(TickerError::BadCharacter));
-        assert_eq!(validate(b"AB*C"), Err(TickerError::BadCharacter));
-        // Non-ASCII cannot appear at all -- the Unicode homoglyph class is
-        // structurally impossible, not merely discouraged.
-        assert_eq!(validate("DIVI\u{0430}".as_bytes()), Err(TickerError::BadCharacter));
-    }
-
-    #[test]
-    fn must_start_with_a_letter() {
-        assert_eq!(validate(b"1ABC"), Err(TickerError::MustStartWithLetter));
-        assert_eq!(validate(b"-ABC"), Err(TickerError::MustStartWithLetter));
-        assert_eq!(validate(b"!ABC"), Err(TickerError::MustStartWithLetter));
-    }
-
-    #[test]
-    fn reserved_names_are_blocked_outright() {
-        for r in RESERVED {
-            assert_eq!(validate(r.as_bytes()), Err(TickerError::Reserved), "{r}");
-        }
-    }
-
-    /// The whole point of §7.6: punctuation and digit variants must not slip past.
-    #[test]
-    fn reserved_blocks_impersonation_variants() {
-        let attacks: &[&[u8]] = &[
-            b"D1VI",   // digit one for I
-            b"D!VI",   // bang for I -- only caught if folding precedes stripping
-            b"DIVI.",  // trailing dot
-            b"D-IVI",  // embedded hyphen
-            b"D.I.V.I",
-            b"DIV_I",
-            b"D!V!",   // both I's replaced
-            b"0IVI",   // zero for O... normalises to OIVI, not DIVI
-            b"DMT-",
-            b"N.F.D",
-            b"P0E",    // zero for O
-            b"D1V1X",
-        ];
-        for a in attacks {
-            let blocked = is_reserved(a);
-            // 0IVI is genuinely a different word (OIVI); assert the rest.
-            if *a == b"0IVI" {
-                assert!(!blocked, "OIVI is not DIVI");
-                continue;
-            }
-            assert!(blocked, "should be reserved: {}", String::from_utf8_lossy(a));
-        }
-    }
-
-    /// Regression guard for the step-order bug. If someone "simplifies" the
-    /// normaliser by stripping punctuation first, this fails.
-    #[test]
-    fn bang_folds_before_punctuation_is_stripped() {
-        assert_eq!(normalise(b"D!VI"), b"DIVI".to_vec());
-        assert_ne!(normalise(b"D!VI"), b"DVI".to_vec());
-        assert!(is_reserved(b"D!VI"));
-    }
-
-    #[test]
-    fn normalisation_does_not_over_reach() {
-        // Ordinary names that merely contain a folded character stay distinct.
-        assert!(!is_reserved(b"GOLD1"));
-        assert!(!is_reserved(b"DIVE"));
-        assert!(!is_reserved(b"DIV"));
-        assert!(validate(b"D1VE").is_ok());
-    }
-
-    #[test]
-    fn charset_check_is_independent_of_reservation() {
-        // A reserved name is still charset-valid; the two checks are separable
-        // so callers can report the precise reason.
-        assert!(validate_charset(b"DIVI").is_ok());
+    fn reserved_and_charset_defences_still_apply() {
         assert_eq!(validate(b"DIVI"), Err(TickerError::Reserved));
+        assert_eq!(validate(b"D!VI"), Err(TickerError::Reserved));
+        assert_eq!(validate(b"divi"), Err(TickerError::Lowercase));
+        assert_eq!(validate("DIVI\u{0430}".as_bytes()), Err(TickerError::BadCharacter));
+        assert_eq!(validate(b"1ABC"), Err(TickerError::MustStartWithLetter));
+        assert!(validate_charset(b"DIVI").is_ok());
     }
 }

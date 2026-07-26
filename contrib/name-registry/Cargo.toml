@@ -1,0 +1,15 @@
+[package]
+name = "name-registry"
+version = "0.1.0"
+edition = "2021"
+description = "Divi Names: the shared, normative name registry. One namespace for human readable addresses (HRAs) and DMT token tickers. Charset, reserved-name defence, commit-reveal, length-tiered fees, and the DVXP type 0x05 record codec. See docs/DIVI-NAMES-PLAN.md"
+license = "MIT"
+
+[dependencies]
+dvxp-core = { path = "../dvxp-core" }
+sha2 = "0.10"
+ripemd = "0.1"
+
+[lib]
+name = "name_registry"
+path = "src/lib.rs"
