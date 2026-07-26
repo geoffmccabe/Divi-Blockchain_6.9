@@ -17,6 +17,7 @@
 #include "base58.h"
 #include <ValidationState.h>
 #include <txdb.h>
+#include <dsconflicts.h>
 #include <boost/foreach.hpp>
 #include <utilstrencodings.h>
 #include <txmempool.h>
@@ -148,6 +149,29 @@ Value getrawmempool(const Array& params, bool fHelp, CWallet* pwallet)
 
         return a;
     }
+}
+
+Value getmempoolconflicts(const Array& params, bool fHelp, CWallet* pwallet)
+{
+    if (fHelp || params.size() != 0)
+        throw runtime_error(
+            "getmempoolconflicts\n"
+            "\nRecent double-spend conflicts this node saw: a transaction that tried to spend a coin already\n"
+            "spent by a transaction we hold was rejected (first-seen-wins). Lets a wallet warn about a\n"
+            "double-spend attempt instead of trusting a 0-confirmation payment blindly.\n"
+            "\nResult:\n"
+            "[ { \"outpoint\": \"txid-n\", \"kept\": \"txid\", \"rejected\": \"txid\", \"time\": n }, ... ]\n");
+
+    Array a;
+    for (const DsConflict& c : GetRecentMempoolConflicts()) {
+        Object o;
+        o.push_back(Pair("outpoint", c.outpoint));
+        o.push_back(Pair("kept", c.keptTxid));
+        o.push_back(Pair("rejected", c.rejectedTxid));
+        o.push_back(Pair("time", c.time));
+        a.push_back(o);
+    }
+    return a;
 }
 
 Value getblockhash(const Array& params, bool fHelp, CWallet* pwallet)

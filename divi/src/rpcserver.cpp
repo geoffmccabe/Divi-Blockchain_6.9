@@ -114,6 +114,7 @@ extern json_spirit::Value getblockcount(const json_spirit::Array& params, bool f
 extern json_spirit::Value getbestblockhash(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value getdifficulty(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value getrawmempool(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
+extern json_spirit::Value getmempoolconflicts(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value getblockhash(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value getblock(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value getblockheader(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
@@ -350,6 +351,7 @@ static const CRPCCommand vRPCCommands[] =
         {"blockchain", "getdifficulty", &getdifficulty, true, false, false, false},
         {"blockchain", "getmempoolinfo", &getmempoolinfo, true, true, false, false},
         {"blockchain", "getrawmempool", &getrawmempool, true, false, false, false},
+        {"blockchain", "getmempoolconflicts", &getmempoolconflicts, true, false, false, false},
         {"blockchain", "gettxout", &gettxout, true, false, false, false},
         {"blockchain", "gettxoutsetinfo", &gettxoutsetinfo, true, false, false, false},
         {"blockchain", "verifychain", &verifychain, true, false, false, false},

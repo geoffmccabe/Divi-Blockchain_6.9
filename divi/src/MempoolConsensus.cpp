@@ -22,9 +22,29 @@
 #include <BlockCheckingHelpers.h>
 #include <NotificationInterface.h>
 #include <MainNotificationRegistration.h>
+#include <dsconflicts.h>
 
 extern CCriticalSection cs_main;
 extern Settings& settings;
+
+// ---- Double-spend conflict log (DiviGossip step 1) ----
+namespace {
+    CCriticalSection cs_dsconflicts;
+    std::vector<DsConflict> g_dsconflicts; // bounded ring, oldest first
+    const size_t DSCONFLICT_MAX = 50;
+}
+void RecordMempoolConflict(const std::string& outpoint, const std::string& keptTxid, const std::string& rejectedTxid)
+{
+    LOCK(cs_dsconflicts);
+    g_dsconflicts.push_back(DsConflict{outpoint, keptTxid, rejectedTxid, GetTime()});
+    if (g_dsconflicts.size() > DSCONFLICT_MAX)
+        g_dsconflicts.erase(g_dsconflicts.begin(), g_dsconflicts.begin() + (g_dsconflicts.size() - DSCONFLICT_MAX));
+}
+std::vector<DsConflict> GetRecentMempoolConflicts()
+{
+    LOCK(cs_dsconflicts);
+    return g_dsconflicts;
+}
 
 bool MempoolConsensus::IsStandardTx(const CTransaction& tx, std::string& reason)
 {
@@ -308,6 +328,14 @@ bool MempoolConsensus::AcceptToMemoryPool(CTxMemPool& pool, CValidationState& st
             if (pool.mapNextTx.count(outpoint)) {
                 // Disable replacement feature for now
                 LogPrint("mempool","%s - Conflicting tx spending same inputs %s\n",__func__, hash);
+                // Remember the conflict so the wallet can warn about a
+                // double-spend attempt (DiviGossip step 1) instead of us
+                // silently dropping the loser.
+                std::string kept;
+                std::map<COutPoint, CInPoint>::const_iterator it = pool.mapNextTx.find(outpoint);
+                if (it != pool.mapNextTx.end() && it->second.ptx != NULL)
+                    kept = it->second.ptx->GetHash().ToString();
+                RecordMempoolConflict(outpoint.ToString(), kept, hash.ToString());
                 return false;
             }
         }
