@@ -39,6 +39,7 @@ pub mod charset;
 pub mod commit;
 pub mod fees;
 pub mod record;
+pub mod people;
 pub mod reserved;
 
 pub use charset::{NameError, NAME_MAX_LEN, TICKER_MAX_LEN};

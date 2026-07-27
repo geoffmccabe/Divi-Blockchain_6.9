@@ -136,6 +136,7 @@ pub fn all() -> impl Iterator<Item = &'static str> {
         .chain(RESERVED_CRYPTO.iter())
         .chain(RESERVED_TECH.iter())
         .copied()
+        .chain(crate::people::all())
 }
 
 #[cfg(test)]
