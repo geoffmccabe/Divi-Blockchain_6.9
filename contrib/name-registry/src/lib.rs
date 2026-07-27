@@ -39,6 +39,7 @@ pub mod charset;
 pub mod commit;
 pub mod fees;
 pub mod record;
+pub mod reserved;
 
 pub use charset::{NameError, NAME_MAX_LEN, TICKER_MAX_LEN};
 pub use record::{NameRecord, TYPE_NAME};
@@ -82,7 +83,7 @@ pub fn explain(err: NameError) -> &'static str {
         NameError::BadCharacter => "Names can use A-Z, 0-9 and ! # ^ - _ + . only. Spaces and accented or non-English letters are not allowed, which is what makes lookalike names impossible.",
         NameError::Lowercase => "Names are stored in capitals, so this should have been converted already. This is a bug in the app, not something you did.",
         NameError::MustStartWithLetter => "A name has to start with a letter.",
-        NameError::Reserved => "That name is reserved to protect Divi's own identity, including lookalikes of it.",
+        NameError::Reserved => "That name is reserved. Divi's own names are protected, as are well-known brand names, including lookalikes of them.",
     }
 }
 

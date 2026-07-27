@@ -26,6 +26,17 @@ use sha2::{Digest, Sha256};
 /// Confirmations a commit must have before its reveal is accepted.
 pub const MIN_COMMIT_DEPTH: u64 = 12;
 
+/// How long a commit stays usable.
+///
+/// ⚠ Without an expiry, commits accumulate forever in every indexer's state.
+/// A commit carries NO registration fee, only a transaction fee, so flooding
+/// the chain with them is cheap, and each one would sit in every wallet's index
+/// permanently. That is a slow disk-filling attack on everyone who runs this.
+///
+/// About three days on 60-second blocks: far longer than the twelve blocks a
+/// legitimate reveal needs, short enough that spam ages out.
+pub const COMMIT_EXPIRY_BLOCKS: u64 = 4320;
+
 /// Salt length in bytes.
 ///
 /// 20, not Namecoin's original 8. Theirs was brute-forceable against the
@@ -60,13 +71,25 @@ pub fn reveal_is_mature(
     salt: &[u8; SALT_LEN],
     name: &[u8],
 ) -> bool {
-    if current_height < commit_height {
-        return false;
-    }
-    if current_height - commit_height < MIN_COMMIT_DEPTH {
+    if !window_is_open(commit_height, current_height) {
         return false;
     }
     &commit_hash(salt, name) == committed
+}
+
+/// Is `current_height` inside the window where a commit may be revealed:
+/// at least [`MIN_COMMIT_DEPTH`] deep, and not yet expired.
+pub fn window_is_open(commit_height: u64, current_height: u64) -> bool {
+    if current_height < commit_height {
+        return false;
+    }
+    let depth = current_height - commit_height;
+    depth >= MIN_COMMIT_DEPTH && depth <= COMMIT_EXPIRY_BLOCKS
+}
+
+/// A commit this old can never be used again and may be dropped from state.
+pub fn is_expired(commit_height: u64, current_height: u64) -> bool {
+    current_height.saturating_sub(commit_height) > COMMIT_EXPIRY_BLOCKS
 }
 
 /// Confirmations still needed before a commit can be revealed.
@@ -128,6 +151,28 @@ mod tests {
     fn a_commit_ahead_of_the_tip_is_never_mature() {
         let committed = commit_hash(&SALT, b"GEOFF");
         assert!(!reveal_is_mature(2000, 1000, &committed, &SALT, b"GEOFF"));
+    }
+
+    /// A commit that nobody revealed must stop being usable, so indexers can
+    /// drop it instead of carrying cheap spam forever.
+    #[test]
+    fn a_commit_expires() {
+        let h = 1000;
+        let committed = commit_hash(&SALT, b"GEOFF");
+        assert!(reveal_is_mature(h, h + COMMIT_EXPIRY_BLOCKS, &committed, &SALT, b"GEOFF"));
+        assert!(!reveal_is_mature(h, h + COMMIT_EXPIRY_BLOCKS + 1, &committed, &SALT, b"GEOFF"));
+        assert!(!is_expired(h, h + COMMIT_EXPIRY_BLOCKS));
+        assert!(is_expired(h, h + COMMIT_EXPIRY_BLOCKS + 1));
+    }
+
+    #[test]
+    fn the_window_has_both_edges() {
+        let h = 500;
+        assert!(!window_is_open(h, h + MIN_COMMIT_DEPTH - 1));
+        assert!(window_is_open(h, h + MIN_COMMIT_DEPTH));
+        assert!(window_is_open(h, h + COMMIT_EXPIRY_BLOCKS));
+        assert!(!window_is_open(h, h + COMMIT_EXPIRY_BLOCKS + 1));
+        assert!(!window_is_open(h, h - 1));
     }
 
     #[test]

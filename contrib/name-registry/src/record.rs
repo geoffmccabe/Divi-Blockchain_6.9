@@ -183,6 +183,12 @@ fn read_name(c: &mut Cursor) -> Result<Vec<u8>, RecordError> {
     if len == 0 {
         return Err(RecordError::Malformed("empty name"));
     }
+    // Refuse on the way in, not just on the way out. A name longer than the
+    // charset permits can never be valid, so decoding it only spends memory on
+    // somebody else's junk.
+    if len > crate::charset::NAME_MAX_LEN {
+        return Err(RecordError::NameTooLong);
+    }
     Ok(c.read_bytes(len)?.to_vec())
 }
 
@@ -449,6 +455,17 @@ mod tests {
             encode_payload(&NameRecord::ClearRecord { name: b"GEOFF".to_vec(), keys: vec![] }),
             Err(RecordError::Malformed(_))
         ));
+    }
+
+    /// Decoding must refuse an over-long name too, or a stranger can make every
+    /// indexer allocate for a name that could never be registered.
+    #[test]
+    fn decode_refuses_an_over_long_name() {
+        let mut p = MAGIC.to_vec();
+        p.extend_from_slice(&[SUPPORTED_VERSION, TYPE_NAME, SUB_SET_PRIMARY]);
+        p.push(200);
+        p.extend_from_slice(&[b'A'; 200]);
+        assert_eq!(decode_payload(&p), Err(RecordError::NameTooLong));
     }
 
     #[test]

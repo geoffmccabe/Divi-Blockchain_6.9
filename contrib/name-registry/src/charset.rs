@@ -36,8 +36,9 @@ pub const NAME_MAX_LEN: usize = 32;
 /// Allowed punctuation.
 const PUNCT: &[u8] = b"!#^-_+.";
 
-/// Names nobody may register, protecting the chain's own identity.
-pub const RESERVED: &[&str] = &["DIVI", "DIVIX", "DMT", "NFD", "POE"];
+/// Names nobody may register. See [`crate::reserved`] for what is on the list
+/// and, just as importantly, what is deliberately not.
+pub use crate::reserved::RESERVED_CHAIN as RESERVED;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameError {
@@ -120,7 +121,7 @@ pub fn normalise(name: &[u8]) -> Vec<u8> {
 /// True if `name` collides with a reserved name once normalised.
 pub fn is_reserved(name: &[u8]) -> bool {
     let candidate = normalise(name);
-    RESERVED.iter().any(|r| normalise(r.as_bytes()) == candidate)
+    crate::reserved::all().any(|r| normalise(r.as_bytes()) == candidate)
 }
 
 /// Full check against an explicit upper bound: charset, length, reserved.
@@ -201,7 +202,7 @@ mod tests {
 
     #[test]
     fn reserved_names_are_blocked_outright() {
-        for r in RESERVED {
+        for r in crate::reserved::RESERVED_CHAIN {
             assert_eq!(validate_ticker(r.as_bytes()), Err(NameError::Reserved), "{r}");
         }
     }
