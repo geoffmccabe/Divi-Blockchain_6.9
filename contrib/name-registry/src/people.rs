@@ -533,7 +533,7 @@ pub fn all() -> impl Iterator<Item = &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::charset::{normalise, validate_name, NameError, NAME_MAX_LEN};
+    use crate::charset::{is_reserved, normalise, validate_name, NAME_MAX_LEN};
 
     /// Every entry must be a shape the charset would otherwise accept. An entry
     /// that could never be typed protects nobody and hides a typo.
@@ -572,23 +572,24 @@ mod tests {
             "SAT0SHI-NAKAM0T0",
             "S.A.T.O.S.H.I.NAKAMOTO",
         ] {
-            assert_eq!(
-                validate_name(typed.as_bytes()),
-                Err(NameError::Reserved),
-                "{typed} should be blocked by the single SATOSHINAKAMOTO entry"
+            assert!(
+                is_reserved(typed.as_bytes()),
+                "{typed} should match the single SATOSHINAKAMOTO entry"
             );
         }
-        // A variant beginning with a digit is refused too, just by the
-        // must-start-with-a-letter rule, which runs first. Still refused; the
-        // reason differs, and asserting the wrong reason would be a test that
-        // only looks strict.
+        // A variant beginning with a digit is refused by the charset before the
+        // reserve is even consulted.
         assert!(validate_name(b"5AT05HI_NAKAM0T0").is_err());
     }
 
+    /// Every listed person is held by the reserve. They are valid NAME shapes,
+    /// which is what allows the reserve to hold them and later hand them over;
+    /// an attempt to register one fails because it is already owned.
     #[test]
-    fn every_person_on_the_list_is_refused() {
+    fn every_person_on_the_list_is_held_by_the_reserve() {
         for p in all() {
-            assert_eq!(validate_name(p.as_bytes()), Err(NameError::Reserved), "{p}");
+            assert!(is_reserved(p.as_bytes()), "{p} should be in the reserve");
+            assert!(validate_name(p.as_bytes()).is_ok(), "{p} must be a valid name shape");
         }
     }
 
@@ -606,10 +607,7 @@ mod tests {
             // Ordinary words that happen to be somebody's handle.
             "BEANIE", "SPARTAN", "REBIRTH", "MONEY", "CRED", "ALT", "SEED", "LIGHT",
         ] {
-            assert!(
-                validate_name(word.as_bytes()).is_ok(),
-                "{word} must stay registrable"
-            );
+            assert!(!is_reserved(word.as_bytes()), "{word} must stay registrable");
         }
     }
 
@@ -618,7 +616,7 @@ mod tests {
     #[test]
     fn genuine_mononyms_are_blocked() {
         for m in ["VITALIK", "COBIE", "PENTOSHI", "NAVAL", "BALAJI", "HSAKA"] {
-            assert_eq!(validate_name(m.as_bytes()), Err(NameError::Reserved), "{m}");
+            assert!(is_reserved(m.as_bytes()), "{m}");
         }
     }
 
@@ -626,7 +624,7 @@ mod tests {
     #[test]
     fn normalisation_does_not_over_reach() {
         for word in ["VITALIY", "COBIA", "NAVALLY", "BACKUP", "GREENHOUSE"] {
-            assert!(validate_name(word.as_bytes()).is_ok(), "{word} must stay registrable");
+            assert!(!is_reserved(word.as_bytes()), "{word} must stay registrable");
         }
         assert_ne!(normalise(b"ADAMBACK"), normalise(b"ADAMBACKER"));
     }

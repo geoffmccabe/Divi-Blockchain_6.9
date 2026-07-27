@@ -142,7 +142,7 @@ pub fn all() -> impl Iterator<Item = &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::charset::{normalise, validate_name, NameError, NAME_MAX_LEN};
+    use crate::charset::{is_reserved, normalise, validate_name, NAME_MAX_LEN};
 
     /// Every reserved entry must itself be a name the charset would otherwise
     /// accept. An entry that could never be typed protects nothing and hides a
@@ -168,18 +168,16 @@ mod tests {
         assert_eq!(seen.len(), before, "the reserved list has duplicates");
     }
 
-    /// The point of the list: these cannot be registered, nor can lookalikes.
+    /// The point of the list: these and their lookalikes are held by the
+    /// reserve, so registering one fails because it is already owned.
     #[test]
-    fn reserved_names_and_their_lookalikes_are_refused() {
+    fn reserved_names_and_their_lookalikes_are_held() {
         for r in all() {
-            assert_eq!(validate_name(r.as_bytes()), Err(NameError::Reserved), "{r}");
+            assert!(is_reserved(r.as_bytes()), "{r}");
+            assert!(validate_name(r.as_bytes()).is_ok(), "{r} must be a valid name shape");
         }
         for attack in ["B1NANCE", "C0INBASE", "M!CROSOFT", "G-O-O-G-L-E", "ETHEREUM."] {
-            assert_eq!(
-                validate_name(attack.as_bytes()),
-                Err(NameError::Reserved),
-                "{attack} should collide with a reserved name"
-            );
+            assert!(is_reserved(attack.as_bytes()), "{attack} should collide with a reserved name");
         }
     }
 
@@ -194,7 +192,7 @@ mod tests {
             "STRIPE", "LEDGER", "KRAKEN", "GEMINI", "PHANTOM", "POLYGON", "AVALANCHE", "RIPPLE",
             "OPTIMISM", "CELSIUS", "ADOBE", "CIRCLE", "EXODUS", "ALCHEMY", "TWITTER",
         ] {
-            assert!(validate_name(word.as_bytes()).is_ok(), "{word} must stay registrable");
+            assert!(!is_reserved(word.as_bytes()), "{word} must stay registrable");
         }
     }
 
@@ -203,7 +201,7 @@ mod tests {
     #[test]
     fn generic_and_community_terms_are_not_reserved() {
         for word in ["BITCOIN", "BLOCKCHAIN", "CRYPTO", "DEFI", "WALLET", "TOKEN", "DOGECOIN"] {
-            assert!(validate_name(word.as_bytes()).is_ok(), "{word} must stay registrable");
+            assert!(!is_reserved(word.as_bytes()), "{word} must stay registrable");
         }
     }
 
@@ -212,7 +210,7 @@ mod tests {
     #[test]
     fn normalisation_does_not_over_reach() {
         for word in ["METAL", "GOOGOL", "TESLAS", "COIN", "CHAIN", "OPEN"] {
-            assert!(validate_name(word.as_bytes()).is_ok(), "{word} must stay registrable");
+            assert!(!is_reserved(word.as_bytes()), "{word} must stay registrable");
         }
         assert_ne!(normalise(b"METAL"), normalise(b"METAMASK"));
     }

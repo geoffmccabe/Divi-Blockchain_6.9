@@ -134,11 +134,23 @@ pub fn validate_max(name: &[u8], max_len: usize) -> Result<(), NameError> {
 }
 
 /// Full check for a human readable address (up to [`NAME_MAX_LEN`]).
+///
+/// ⚠ **Reserved names are VALID here.** Brands and well-known people are not
+/// refused by the charset; they are held from the start by the names reserve
+/// (see `reserved`), so an attempt to register one fails for the ordinary
+/// reason that the name is already owned. That is what makes them assignable:
+/// a name the rules called invalid could never be handed to the person or
+/// company it belongs to.
 pub fn validate_name(name: &[u8]) -> Result<(), NameError> {
-    validate_max(name, NAME_MAX_LEN)
+    validate_charset_max(name, NAME_MAX_LEN)
 }
 
 /// Full check for a DMT token ticker (up to [`TICKER_MAX_LEN`]).
+///
+/// ⚠ Deliberately STRICTER than [`validate_name`]: tickers still refuse
+/// reserved names outright. DMT has no reserve to hold them and no seeding
+/// step, so refusing is the only protection available there. Loosening this to
+/// match names would let anyone mint a token called BINANCE.
 pub fn validate_ticker(name: &[u8]) -> Result<(), NameError> {
     validate_max(name, TICKER_MAX_LEN)
 }
@@ -200,11 +212,17 @@ mod tests {
         assert_eq!(validate_ticker(b"!ABC"), Err(NameError::MustStartWithLetter));
     }
 
+    /// Tickers still refuse them; names do not, because names hold them in the
+    /// reserve instead so they can be assigned to their rightful owner later.
     #[test]
-    fn reserved_names_are_blocked_outright() {
+    fn reserved_names_are_blocked_for_tickers_but_valid_as_names() {
         for r in crate::reserved::RESERVED_CHAIN {
             assert_eq!(validate_ticker(r.as_bytes()), Err(NameError::Reserved), "{r}");
+            assert!(validate_name(r.as_bytes()).is_ok(), "{r} must be a valid NAME shape");
         }
+        assert_eq!(validate_ticker(b"BINANCE"), Err(NameError::Reserved));
+        assert!(validate_name(b"BINANCE").is_ok());
+        assert!(validate_name(b"SATOSHINAKAMOTO").is_ok());
     }
 
     /// Punctuation and digit variants must not slip past.

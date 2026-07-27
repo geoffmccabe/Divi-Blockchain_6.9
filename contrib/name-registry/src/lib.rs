@@ -84,7 +84,7 @@ pub fn explain(err: NameError) -> &'static str {
         NameError::BadCharacter => "Names can use A-Z, 0-9 and ! # ^ - _ + . only. Spaces and accented or non-English letters are not allowed, which is what makes lookalike names impossible.",
         NameError::Lowercase => "Names are stored in capitals, so this should have been converted already. This is a bug in the app, not something you did.",
         NameError::MustStartWithLetter => "A name has to start with a letter.",
-        NameError::Reserved => "That name is reserved. Divi's own names are protected, as are well-known brand names, including lookalikes of them.",
+        NameError::Reserved => "That name is held in reserve. Divi's own names are, as are well-known brands and people, including lookalikes of them.",
     }
 }
 
@@ -112,9 +112,11 @@ mod tests {
     #[test]
     fn refusals_are_specific_and_explained() {
         assert_eq!(quote("ab"), Err(NameError::TooShort));
-        assert_eq!(quote("divi"), Err(NameError::Reserved));
-        assert_eq!(quote("d!vi"), Err(NameError::Reserved));
         assert_eq!(quote("ge off"), Err(NameError::BadCharacter));
+        // Reserved names quote fine: they are valid shapes held by the reserve,
+        // and it is the ledger that refuses to register an owned name.
+        assert!(quote("divi").is_ok());
+        assert!(charset::is_reserved(b"DIVI"));
         assert_eq!(quote("1geoff"), Err(NameError::MustStartWithLetter));
         for e in [
             NameError::TooShort,
