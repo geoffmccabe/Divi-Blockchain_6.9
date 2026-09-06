@@ -105,14 +105,44 @@ existing node connection, and calls `query::` directly. No second process to
 install and supervise, no port, no proxy, and no CSP question. The HTTP API is
 for the explorer and anything outside the wallet.
 
-## Phase 3 — collectibles visible on scan.divi.love · NOT STARTED
+## Phase 3 — collectibles visible on scan.divi.love · BUILT 2026-Sep-06
 
-- Thumbnails inline in block and transaction pages. The mint record already
-  carries a 32-byte `thumb_ptr`, so no format change is needed.
-- A thumbnail and collection cache, strictly a cache with the chain as authority,
-  so an outage makes pages slower and never makes ownership wrong.
-- Collectible detail, collection and creator pages; keyword search.
-- Fill the four page shells already in `Divilovescan/src/collectibles/`.
+`Divilovescan` commit `426310f`. The repo was unowned; this lane has taken it.
+
+- **Thumbnails in block and transaction pages**, linking to the collectible and
+  to the transaction that minted it. Renders nothing when a block contains
+  nothing, which is almost every block. Needed two new index routes so a block
+  page is one request rather than one per transaction in it.
+- **Real pages**: a collectible (owner, provenance, collection, content
+  fingerprint), a collection with its members and its enforced cap, and a list
+  with search. Search is narrow on purpose: an id, an owner, or a collection.
+  The chain carries no name, and matching off-chain metadata we have not fetched
+  would return results the index cannot stand behind.
+- **Every preview passes through `functions/api/nfd-image`**, never an `<img>`
+  pointed at a gateway. This is the image cache asked for, and it is also the
+  moderation choke point the plan requires: a blocklist is only enforceable if
+  every image goes through one place. Four reasons, in the file.
+- **Previews are labelled as the creator's claim** wherever they appear at a
+  readable size. Nothing on-chain binds a preview to the encrypted content, so a
+  page implying the picture IS the asset is where someone gets defrauded. That
+  sentence lives in one component so it cannot soften.
+- **The explorer's own scanner is gone**, replaced by a two-line shim around
+  `dvxp-scan`. The daemon moved into the library so both hosts run the same loop.
+
+**Not yet verified against real data.** No collectible has ever been minted, so
+every page has been exercised against an empty index and by tests, not against a
+real preview. The first mint is the real test.
+
+**Ops still required before this is live:** the indexer must run beside the node
+and be reachable through the tunnel, and `OVERLAY_ORIGIN` must be set in
+Cloudflare alongside the existing `SCAN_ORIGIN`. Until then the explorer degrades
+exactly as designed: block and transaction pages are unaffected, and the
+collectibles pages say the index is unavailable.
+
+**Found while re-vendoring:** `name-registry` was missing from the explorer's
+`sync-crates.sh`, so its vendored crate set had quietly stopped building.
+`dmt-indexer` gained that dependency when tokens and Divi Names started sharing
+ticker rules, and nothing re-ran the script afterwards.
 
 ## Phase 4 — the collectibles grid in DD69 · NOT STARTED
 
