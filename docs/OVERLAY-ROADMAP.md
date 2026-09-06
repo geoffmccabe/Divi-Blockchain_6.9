@@ -80,6 +80,16 @@ and an index against a real chain would record issuances that never paid.
 `treasury_is_configured()` had existed all along and nothing called it.
 `ALLOW_PLACEHOLDER_TREASURY=1` for regtest.
 
+**Worth adopting from Divi Names (suggested, not done):** that protocol has no
+placeholder at all. Its treasury is an `Option<Address>`: either a real chosen
+address, or `None`, and on `None` the indexer refuses to scan and the wallet
+refuses to register. There is no state in which a payment to an uncontrolled
+address satisfies a fee, because the unconfigured case cannot be represented as
+an address. DMT's all-zero placeholder is a valid-looking `Address` that happens
+to be nobody's, which is why a runtime guard was needed at all. Changing the type
+would make the guard unnecessary rather than merely present. Confirmed with the
+HRA lane 2026-Sep-06.
+
 **Verified live** against the HRA lane's regtest node: caught up 3,320 blocks,
 reported `trustworthy: false` while behind and `true` once current, then followed
 new blocks as the miner produced them. All routes exercised, bad addresses and
