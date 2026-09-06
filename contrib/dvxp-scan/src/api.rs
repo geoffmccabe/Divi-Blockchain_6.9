@@ -120,10 +120,27 @@ fn route(path: &str, qs: &str, shared: &Shared) -> (u16, Value) {
 
     let mut segments = path.trim_matches('/').split('/');
     let head = segments.next().unwrap_or("");
-    let arg = segments.next().unwrap_or("");
+    // Percent-decoded, because a caller building a URL properly will encode
+    // anything non-alphanumeric. A token id is "306:2", and encodeURIComponent
+    // turns that colon into %3A, so a route that does not decode rejects every
+    // correctly-formed request it receives.
+    let arg_raw = segments.next().unwrap_or("");
+    let arg_decoded = percent_decode(arg_raw);
+    let arg = arg_decoded.as_str();
 
     let payload: Result<Value, (u16, &str)> = match (head, arg) {
         ("", _) | ("sync", _) => Ok(json!({})),
+
+        ("stats", _) => {
+            let st = query::stats(&overlay);
+            Ok(json!({
+                "tokens": st.tokens,
+                "tokenHolders": st.token_holders,
+                "collectibles": st.collectibles,
+                "collections": st.collections,
+                "creators": st.creators,
+            }))
+        }
 
         ("tokens", "") => Ok(json!({
             "tokens": query::all_tokens(&overlay).iter().map(token_json).collect::<Vec<_>>(),
@@ -464,6 +481,18 @@ fn respond(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this guards: encodeURIComponent("306:2") is "306%3A2", so a
+    /// route that does not decode its path rejects every properly-built URL.
+    #[test]
+    fn an_encoded_token_id_in_the_path_still_resolves() {
+        let shared = Shared::new(Overlay::new());
+        // 404 means it parsed the id and found no such token. 400 would mean it
+        // could not read the id at all, which is the failure being prevented.
+        assert_eq!(route("/token/306%3A2", "", &shared).0, 404);
+        assert_eq!(route("/token/306:2", "", &shared).0, 404);
+        assert_eq!(route("/token/nonsense", "", &shared).0, 400);
+    }
 
     #[test]
     fn percent_decoding_handles_what_a_search_box_sends() {

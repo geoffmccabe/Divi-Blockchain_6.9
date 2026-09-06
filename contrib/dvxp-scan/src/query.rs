@@ -425,6 +425,52 @@ pub fn block_activity(o: &Overlay, height: u64) -> BlockActivity {
     out
 }
 
+/// Headline counts, for a front page.
+///
+/// "Holders" and "creators" are counted as distinct addresses rather than as
+/// rows, because a person who holds three tokens is one holder, and a table
+/// length would flatter the numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Stats {
+    pub tokens: usize,
+    /// Distinct addresses holding a non-zero balance of anything.
+    pub token_holders: usize,
+    pub collectibles: usize,
+    pub collections: usize,
+    /// Distinct addresses that have minted a collectible.
+    pub creators: usize,
+}
+
+pub fn stats(o: &Overlay) -> Stats {
+    use crate::events::NfdEventKind;
+    use std::collections::BTreeSet;
+
+    let holders: BTreeSet<&AddrKey> = o
+        .dmt
+        .ledger
+        .state
+        .balances
+        .iter()
+        .filter(|(_, amount)| **amount > 0)
+        .map(|((_, addr), _)| addr)
+        .collect();
+
+    let creators: BTreeSet<AddrKey> = o
+        .log
+        .nfd_events()
+        .filter(|e| e.kind == NfdEventKind::Mint)
+        .filter_map(|e| e.to)
+        .collect();
+
+    Stats {
+        tokens: o.dmt.ledger.state.tokens.len(),
+        token_holders: holders.len(),
+        collectibles: o.nfd.count(),
+        collections: o.nfd.collection_count(),
+        creators: creators.len(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Collectibles
 // ---------------------------------------------------------------------------
