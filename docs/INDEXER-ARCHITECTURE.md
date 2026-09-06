@@ -70,32 +70,63 @@ next year? Write a handler, register it. Done — no scanner or envelope edits.
 state model — DMT: token balances + tickers; NFD: address→NFD ownership + the
 Arweave/hash pointers; PoE: the anchor set.
 
-## Migration — DMT indexer (mechanical, same semantics)
+## Migration — DMT indexer: DONE
 
-`contrib/dmt-indexer/` currently carries its own `envelope.rs` and `varint.rs`.
-These are semantically identical to `dvxp-core`'s (same magic, same version-halt,
-same canonical varints), by design — so the switch is drop-in:
+`dmt-indexer` no longer carries its own `envelope.rs` / `varint.rs`; it depends on
+`dvxp-core` and uses `classify()` directly. `nfd-indexer` is a `RecordHandler`
+for `0x02` and goes through `Registry`. Note the asymmetry, because it surprises
+everyone who drives both: **DMT is not a `RecordHandler`.** Its ledger needs a
+`TxContext` carrying every payment the transaction makes, because a priced mint
+must be paid for in the *same* transaction. A driver has to build the richer
+context and call `dmt_indexer::parse_payload` itself.
 
-1. Add `dvxp-core = { path = "../dvxp-core" }` to `dmt-indexer/Cargo.toml`.
-2. Delete `dmt-indexer/src/{envelope,varint}.rs`; `use dvxp_core::{classify,
-   varint::*, codec::*, registry::*}`.
-3. Make the DMT logic a `RecordHandler` for `record_type() == 0x04`, returning its
-   canonical state delta for the fingerprint.
+## Where the shared pieces actually stand (2026-Sep-06)
 
-The NFD workstream builds its `RecordHandler` for `0x02` the same way. Result: one
-scanner, one fingerprint, one halt/skip rule — three (soon four) protocols.
+This section was stale for a while and said "still to build" about code that
+exists. Corrected, and kept honest from here.
 
-## Still to build (shared, next)
+**Built, per-protocol, not yet shared:**
 
-`dvxp-core` owns the pure/deterministic core. The remaining shared pieces should
-also land here, once, rather than per-protocol:
+- **Rules engines.** `dmt-indexer` (8 record types, ledger, 72 tests) and
+  `nfd-indexer` (ownership ledger, 10 tests).
+- **Reorg/undo — DMT only.** `dmt-indexer/src/ledger/reorg.rs` retains 200 blocks
+  of undo against Divi's hard 100-block reorg cap and halts rather than guessing
+  beyond it. **`nfd-indexer` has none**, so a reorg would leave collectible
+  ownership quietly wrong. Fixing that is a prerequisite for any live scanner.
 
-- **Block scanner** — walk blocks → txs → OP_META outputs → payloads via the
-  node RPC (the Rust successor to `contrib/poe/poe_index.py`), resolving each
-  tx's `vin[0]` prevout to fill `RecordContext.sender`.
-- **Reorg/undo** — retain undo data for 200 blocks (Divi hard-caps reorgs at
-  100); halt on anything deeper. Applies to every handler's state uniformly.
-- **State store** — a SQLite home with a per-protocol schema, plus the published
-  fingerprint per block.
+**Built, but in the wrong place and not a service:**
 
-Coordinate here before implementing these so we don't build two.
+- **Block scanner.** `Divilovescan/indexer/src/main.rs` walks blocks, pulls
+  `OP_META` outputs, and drives both indexers. It works, and it is a **one-shot
+  batch scan**: it runs `start..tip` once and exits. No resume, no tip following,
+  no reorg handling, no RPC throttle, and its output is a single JSON snapshot
+  rather than anything queryable. It also advances the fingerprint from **NFD
+  deltas only**, so the published fingerprint does not currently cover DMT at
+  all — the one value whose job is catching divergence is blind to tokens.
+
+**Now built, here: `contrib/dvxp-scan`.**
+
+A library with a daemon on top. `driver::Overlay` is pure and drives every
+protocol over one pass, with **one combined fingerprint** (tagged per record
+type, so tokens are no longer invisible to it) and **one reorg window**. The
+`rpc` feature carries the throttled node client; the wallet depends on the crate
+with `default-features = false` and drives it in-process from its own node
+connection, which is what keeps a self-custody wallet independent of any server
+we run. `nfd-indexer` gained the undo log it was missing so that window covers
+both protocols.
+
+**Still genuinely missing:**
+
+- **State store.** A per-protocol schema shaped around the queries in DD69's
+  `docs/DMT-WALLET-INTERFACE.md` §2, plus the published fingerprint per block.
+  `dvxp-scan` publishes progress and sync state today; it does not yet answer
+  "what does this address hold".
+- **Genesis height.** Still `0` in `dmt-indexer/src/config.rs`. Until it is set,
+  every scan replays 4.1M irrelevant blocks.
+
+**Decision (2026-Sep-06), now implemented:** the scanner lives here, in
+`contrib/dvxp-scan`, as a library with a thin binary on top. Divilovescan and
+DD69 both vendor it the same way they already vendor `dvxp-core` and the rules
+crates. Any other arrangement means the wallet and the explorer can run different
+scanning rules, which is exactly the divergence this crate exists to prevent.
+`Divilovescan/indexer` is superseded and should be switched over to it.

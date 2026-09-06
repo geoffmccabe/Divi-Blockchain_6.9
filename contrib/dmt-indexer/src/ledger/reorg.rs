@@ -89,6 +89,19 @@ impl Chain {
     /// agrees — which is what makes it a useful cross-check between
     /// independent implementations rather than a check that they share code.
     pub fn end_block(&mut self, height: u64) -> Fingerprint {
+        self.end_block_deltas(height).0
+    }
+
+    /// Close the block and hand back its canonical delta bytes as well as the
+    /// fingerprint.
+    ///
+    /// A driver running several protocols over one chain needs these. DMT's own
+    /// fingerprint attests only to token state, so a combined indexer that
+    /// published it would be claiming coverage it does not have: the value whose
+    /// entire job is catching two implementations disagreeing would be blind to
+    /// everything except tokens. Such a driver folds each protocol's deltas into
+    /// one chained fingerprint instead, and this is how it gets DMT's half.
+    pub fn end_block_deltas(&mut self, height: u64) -> (Fingerprint, Vec<u8>) {
         let undo = self.ledger.state.take_pending();
         let deltas = encode_deltas(&self.ledger.state, &undo);
         self.fingerprint = self.fingerprint.advance(height, &deltas);
@@ -102,7 +115,7 @@ impl Chain {
             self.history.pop_front();
         }
         self.tip = Some(height);
-        self.fingerprint
+        (self.fingerprint, deltas)
     }
 
     /// Fingerprint recorded after a given block, if still retained. This is what

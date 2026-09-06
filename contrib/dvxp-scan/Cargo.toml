@@ -1,0 +1,32 @@
+[package]
+name = "dvxp-scan"
+version = "0.1.0"
+edition = "2021"
+description = "Shared block scanner for Divi overlay protocols. Drives every DVXP handler over one pass of the chain, with one combined fingerprint and one reorg window, so the wallet and the explorer cannot scan by different rules."
+license = "MIT"
+
+[dependencies]
+dvxp-core = { path = "../dvxp-core" }
+dmt-indexer = { path = "../dmt-indexer" }
+nfd-indexer = { path = "../nfd-indexer" }
+
+# I/O only. The `rpc` feature is what separates the library from the daemon:
+# the wallet drives the scanner in-process from its own node connection and
+# wants none of this, so it depends on the crate with default-features = false.
+ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+default = ["rpc"]
+rpc = ["dep:ureq", "dep:serde_json"]
+
+[lib]
+name = "dvxp_scan"
+path = "src/lib.rs"
+
+# The daemon is the thin shell; everything it knows lives in the library, so the
+# wallet gets the same behaviour without running a separate process.
+[[bin]]
+name = "divi-overlay-indexer"
+path = "src/bin/divi-overlay-indexer.rs"
+required-features = ["rpc"]

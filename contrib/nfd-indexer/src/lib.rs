@@ -60,12 +60,37 @@ pub struct Collection {
     pub minted: u32,
 }
 
+/// One reversible change, kept so a reorg can be undone exactly.
+///
+/// DMT has had this since it was written; NFD went without it, which meant a
+/// reorg silently left collectible ownership wrong. Wrong ownership that nobody
+/// is told about is the one failure this whole design is supposed to prevent, so
+/// the ledger now records the inverse of every mutation it makes.
+///
+/// Entries are recorded **only on success**. A record that is skipped changes no
+/// state, so it has nothing to undo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Undo {
+    /// A collectible was created. Remove it, and give back the collection slot
+    /// it consumed if it was minted into one.
+    Minted { mint_txid: [u8; 32], collection: Option<[u8; 32]> },
+    /// Ownership moved. Put it back where it was.
+    Transferred { mint_txid: [u8; 32], previous_owner: Addr21 },
+    /// An encryption key was announced. Restore the key it replaced, or remove
+    /// the entry entirely if this address had never announced one.
+    KeyAnnounced { addr: Addr21, previous: Option<[u8; 32]> },
+    /// A collection was created. Remove it.
+    CollectionCreated { id: [u8; 32] },
+}
+
 /// The NFD ownership ledger. Keyed by mint txid (the collectible's id).
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct NfdLedger {
     nfds: HashMap<[u8; 32], Nfd>,
     collections: HashMap<[u8; 32], Collection>, // collection id (create txid) -> collection
     keys: HashMap<Addr21, [u8; 32]>,            // address -> announced X25519 encryption pubkey
+    /// Inverses of everything applied since the last [`NfdLedger::take_block_undo`].
+    undo: Vec<Undo>,
 }
 
 impl NfdLedger {
@@ -94,6 +119,62 @@ impl NfdLedger {
     }
     pub fn collection_count(&self) -> usize {
         self.collections.len()
+    }
+
+    /// Take everything applied since the last call. The driver calls this at a
+    /// block boundary and keeps the result alongside the block, which is what
+    /// makes a later rollback possible.
+    pub fn take_block_undo(&mut self) -> Vec<Undo> {
+        std::mem::take(&mut self.undo)
+    }
+
+    /// Whether anything has been applied since the last [`Self::take_block_undo`].
+    pub fn has_pending_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
+
+    /// Reverse one block, newest change first.
+    ///
+    /// Order matters and is not cosmetic. Within a block a collectible can be
+    /// minted and then transferred; undoing the mint first would leave the
+    /// transfer with nothing to put back. Reversing the log end to start makes
+    /// each inverse see exactly the state its forward step saw.
+    ///
+    /// This is deliberately infallible. The entries were produced by mutations
+    /// this ledger actually performed, so there is no user input to reject here;
+    /// anything unexpected means the caller handed back an undo log from a
+    /// different ledger, which is a programming error rather than a chain event.
+    pub fn rollback_block(&mut self, undo: Vec<Undo>) {
+        for entry in undo.into_iter().rev() {
+            match entry {
+                Undo::Minted { mint_txid, collection } => {
+                    self.nfds.remove(&mint_txid);
+                    if let Some(cid) = collection {
+                        if let Some(col) = self.collections.get_mut(&cid) {
+                            // Mirrors the saturating_add on the way in, so a
+                            // count can never wrap under repeated rollback.
+                            col.minted = col.minted.saturating_sub(1);
+                        }
+                    }
+                }
+                Undo::Transferred { mint_txid, previous_owner } => {
+                    if let Some(nfd) = self.nfds.get_mut(&mint_txid) {
+                        nfd.owner = previous_owner;
+                    }
+                }
+                Undo::KeyAnnounced { addr, previous } => match previous {
+                    Some(key) => {
+                        self.keys.insert(addr, key);
+                    }
+                    None => {
+                        self.keys.remove(&addr);
+                    }
+                },
+                Undo::CollectionCreated { id } => {
+                    self.collections.remove(&id);
+                }
+            }
+        }
     }
 
     fn sender(ctx: &RecordContext) -> Result<Addr21, Ignored> {
@@ -147,6 +228,8 @@ impl NfdLedger {
                 mint_tx_index: ctx.tx_index,
             },
         );
+        self.undo.push(Undo::Minted { mint_txid: ctx.txid, collection: collection_ref });
+
         let mut d = vec![SUB_MINT];
         d.extend_from_slice(&ctx.txid);
         d.extend_from_slice(&owner);
@@ -164,11 +247,18 @@ impl NfdLedger {
             return Err(Ignored::TrailingBytes);
         }
         let sender = Self::sender(ctx)?;
-        let nfd = self.nfds.get_mut(&mint_txid).ok_or(Ignored::RuleViolation("unknown nfd"))?;
-        if nfd.owner != sender {
-            return Err(Ignored::RuleViolation("sender is not the current owner"));
-        }
-        nfd.owner = new_owner;
+        // Scoped so the mutable borrow ends before the undo log is touched.
+        let previous_owner = {
+            let nfd = self.nfds.get_mut(&mint_txid).ok_or(Ignored::RuleViolation("unknown nfd"))?;
+            if nfd.owner != sender {
+                return Err(Ignored::RuleViolation("sender is not the current owner"));
+            }
+            let previous = nfd.owner;
+            nfd.owner = new_owner;
+            previous
+        };
+        self.undo.push(Undo::Transferred { mint_txid, previous_owner });
+
         let mut d = vec![SUB_TRANSFER];
         d.extend_from_slice(&mint_txid);
         d.extend_from_slice(&new_owner);
@@ -182,7 +272,9 @@ impl NfdLedger {
             return Err(Ignored::TrailingBytes);
         }
         let addr = Self::sender(ctx)?;
-        self.keys.insert(addr, enc_pubkey);
+        let previous = self.keys.insert(addr, enc_pubkey);
+        self.undo.push(Undo::KeyAnnounced { addr, previous });
+
         let mut d = vec![SUB_KEYANNOUNCE];
         d.extend_from_slice(&addr);
         d.extend_from_slice(&enc_pubkey);
@@ -202,6 +294,8 @@ impl NfdLedger {
         }
         let creator = Self::sender(ctx)?;
         self.collections.insert(ctx.txid, Collection { creator, max_supply, meta_ptr, minted: 0 });
+        self.undo.push(Undo::CollectionCreated { id: ctx.txid });
+
         let mut d = vec![SUB_COLLECTION];
         d.extend_from_slice(&ctx.txid);
         d.extend_from_slice(&creator);
@@ -372,5 +466,143 @@ mod tests {
         payload.extend_from_slice(&mint_body(false));
         let out = reg.process(&payload, &ctx(1, Some(addr(7)))).unwrap();
         assert!(matches!(out, Outcome::Applied { record_type: TYPE_NFD, .. }));
+    }
+
+    // ---- reorg rollback -------------------------------------------------
+    //
+    // Divi hard-caps reorgs at 100 blocks, so these are not hypothetical: a
+    // block containing a mint or a transfer can and will be replaced.
+
+    fn transfer_body(mint_txid: u8, to: u8) -> Vec<u8> {
+        let mut b = vec![mint_txid; 32];
+        b.extend_from_slice(&pk(to));
+        b.extend_from_slice(&[0u8; 32]); // wrapkey_ptr
+        b
+    }
+
+    #[test]
+    fn rollback_removes_a_mint_and_leaves_no_trace() {
+        let mut l = NfdLedger::new();
+        l.apply(&rec(SUB_MINT, &mint_body(false)), &ctx(1, Some(addr(7)))).unwrap();
+        assert!(l.has_pending_undo());
+
+        let undo = l.take_block_undo();
+        assert!(!l.has_pending_undo(), "taking the log must clear it");
+
+        l.rollback_block(undo);
+        assert_eq!(l.count(), 0);
+        assert_eq!(l.owner_of(&[1; 32]), None);
+    }
+
+    #[test]
+    fn rollback_puts_ownership_back_where_it_was() {
+        let mut l = NfdLedger::new();
+        l.apply(&rec(SUB_MINT, &mint_body(false)), &ctx(1, Some(addr(7)))).unwrap();
+        let _block_one = l.take_block_undo();
+
+        l.apply(&rec(SUB_TRANSFER, &transfer_body(1, 9)), &ctx(2, Some(addr(7)))).unwrap();
+        assert_eq!(l.owner_of(&[1; 32]), Some(pk(9)));
+
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert_eq!(l.owner_of(&[1; 32]), Some(pk(7)), "the collectible must go home");
+        assert_eq!(l.count(), 1, "rolling back a transfer must not delete it");
+    }
+
+    /// The ordering property. Two transfers in one block only unwind correctly
+    /// when the log is replayed backwards; forwards leaves the collectible with
+    /// the wrong owner, which is precisely the silent corruption to avoid.
+    #[test]
+    fn two_transfers_in_one_block_unwind_newest_first() {
+        let mut l = NfdLedger::new();
+        l.apply(&rec(SUB_MINT, &mint_body(false)), &ctx(1, Some(addr(7)))).unwrap();
+        let _block_one = l.take_block_undo();
+
+        l.apply(&rec(SUB_TRANSFER, &transfer_body(1, 9)), &ctx(2, Some(addr(7)))).unwrap();
+        l.apply(&rec(SUB_TRANSFER, &transfer_body(1, 5)), &ctx(3, Some(addr(9)))).unwrap();
+        assert_eq!(l.owner_of(&[1; 32]), Some(pk(5)));
+
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert_eq!(l.owner_of(&[1; 32]), Some(pk(7)));
+    }
+
+    /// A collection slot consumed by a mint that later gets reorged away must
+    /// come back. Otherwise every reorg permanently shrinks a capped collection
+    /// and the cap quietly stops meaning what the creator published.
+    #[test]
+    fn rollback_gives_back_the_collection_slot() {
+        let mut l = NfdLedger::new();
+        let mut cbody = 1u32.to_be_bytes().to_vec(); // cap of exactly one
+        cbody.extend_from_slice(&[0xee; 32]);
+        l.apply(&rec(SUB_COLLECTION, &cbody), &ctx(100, Some(addr(7)))).unwrap();
+        let cid = [100u8; 32];
+        let _block_one = l.take_block_undo();
+
+        l.apply(&rec(SUB_MINT, &coll_mint_body(&cid)), &ctx(102, Some(addr(7)))).unwrap();
+        assert_eq!(l.collection_of(&cid).unwrap().minted, 1);
+        // Cap is full, so a second mint is refused.
+        assert!(l.apply(&rec(SUB_MINT, &coll_mint_body(&cid)), &ctx(103, Some(addr(7)))).is_err());
+
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert_eq!(l.collection_of(&cid).unwrap().minted, 0, "the slot must be returned");
+        assert_eq!(l.collection_count(), 1, "the collection itself survives");
+
+        // And the freed slot is genuinely usable again.
+        l.apply(&rec(SUB_MINT, &coll_mint_body(&cid)), &ctx(104, Some(addr(7)))).unwrap();
+        assert_eq!(l.collection_of(&cid).unwrap().minted, 1);
+    }
+
+    #[test]
+    fn rollback_removes_a_collection_it_created() {
+        let mut l = NfdLedger::new();
+        let mut cbody = 0u32.to_be_bytes().to_vec();
+        cbody.extend_from_slice(&[0xee; 32]);
+        l.apply(&rec(SUB_COLLECTION, &cbody), &ctx(100, Some(addr(7)))).unwrap();
+        assert_eq!(l.collection_count(), 1);
+
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert_eq!(l.collection_count(), 0);
+    }
+
+    #[test]
+    fn rollback_restores_a_replaced_key_and_clears_a_first_one() {
+        let mut l = NfdLedger::new();
+        // First announcement: there was nothing before it.
+        l.apply(&rec(SUB_KEYANNOUNCE, &[0x11; 32]), &ctx(1, Some(addr(7)))).unwrap();
+        let first = l.take_block_undo();
+
+        // Second announcement replaces it.
+        l.apply(&rec(SUB_KEYANNOUNCE, &[0x22; 32]), &ctx(2, Some(addr(7)))).unwrap();
+        assert_eq!(l.enc_pubkey_of(&pk(7)), Some([0x22; 32]));
+
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert_eq!(l.enc_pubkey_of(&pk(7)), Some([0x11; 32]), "the replaced key comes back");
+
+        l.rollback_block(first);
+        assert_eq!(l.enc_pubkey_of(&pk(7)), None, "the first announcement leaves no entry");
+    }
+
+    /// Ignore, never destroy, extended to the undo log: a record that changed
+    /// nothing must not leave an inverse behind, or a rollback would "undo" a
+    /// mutation that never happened.
+    #[test]
+    fn skipped_records_record_no_undo() {
+        let mut l = NfdLedger::new();
+        l.apply(&rec(SUB_MINT, &mint_body(false)), &ctx(1, Some(addr(7)))).unwrap();
+        let _ = l.take_block_undo();
+
+        // Every one of these must be refused, and none may touch the log.
+        assert!(l.apply(&rec(SUB_MINT, &mint_body(false)), &ctx(1, Some(addr(9)))).is_err()); // duplicate id
+        assert!(l.apply(&rec(SUB_MINT, &mint_body(false)), &ctx(2, None)).is_err()); // no sender
+        assert!(l.apply(&rec(SUB_TRANSFER, &transfer_body(1, 5)), &ctx(3, Some(addr(9)))).is_err()); // not the owner
+        assert!(l.apply(&rec(SUB_TRANSFER, &transfer_body(8, 5)), &ctx(4, Some(addr(7)))).is_err()); // unknown nfd
+        assert!(l.apply(&rec(SUB_MINT, b"short"), &ctx(5, Some(addr(7)))).is_err()); // malformed
+
+        assert!(!l.has_pending_undo(), "a skipped record must leave nothing to undo");
+        assert_eq!(l.owner_of(&[1; 32]), Some(pk(7)));
     }
 }
