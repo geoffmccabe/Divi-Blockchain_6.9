@@ -942,6 +942,82 @@ mod tests {
         );
     }
 
+    /// A block page asks one question, not one per transaction in the block.
+    #[test]
+    fn a_block_reports_its_own_overlay_activity() {
+        use crate::query;
+
+        let mut o = Overlay::new();
+        let minter = addr(7);
+
+        assert!(query::block_activity(&o, 1).is_empty());
+
+        o.apply_block(&block(
+            1,
+            1,
+            vec![tx(0, 0x11, envelope(TYPE_NFD, 0x01, &nfd_mint()), Some(minter))],
+        ))
+        .unwrap();
+
+        let a = query::block_activity(&o, 1);
+        assert_eq!(a.minted.len(), 1);
+        assert_eq!(a.minted[0].id, [0x11; 32]);
+        assert!(a.transferred.is_empty());
+        assert!(!a.is_empty());
+
+        // A block with nothing in it says so, rather than being indistinguishable
+        // from a block the index has not reached.
+        o.apply_block(&empty(2, 2)).unwrap();
+        assert!(query::block_activity(&o, 2).is_empty());
+    }
+
+    /// The trap a transaction page falls into if it looks its own txid up as a
+    /// collectible id: that finds the mint and misses the transfer entirely.
+    #[test]
+    fn a_transfer_is_found_by_its_own_transaction_not_the_collectible_id() {
+        use crate::query;
+
+        let mut o = Overlay::new();
+        let minter = addr(7);
+        let buyer = addr(9);
+
+        o.apply_block(&block(
+            1,
+            1,
+            vec![tx(0, 0x11, envelope(TYPE_NFD, 0x01, &nfd_mint()), Some(minter))],
+        ))
+        .unwrap();
+        let id = [0x11u8; 32];
+
+        let mut body = id.to_vec();
+        let mut packed = Vec::new();
+        buyer.write(&mut packed);
+        body.extend_from_slice(&packed);
+        body.extend_from_slice(&[0u8; 32]);
+
+        // The transfer rides a DIFFERENT transaction from the mint.
+        o.apply_block(&block(
+            2,
+            2,
+            vec![tx(0, 0x99, envelope(TYPE_NFD, 0x02, &body), Some(minter))],
+        ))
+        .unwrap();
+
+        // Looked up as a collectible id, tx 0x99 is nothing at all.
+        assert_eq!(query::nfd(&o, &[0x99; 32]), None);
+
+        // Looked up as a transaction, it is the transfer.
+        let a = query::tx_activity(&o, &[0x99; 32]);
+        assert_eq!(a.transferred.len(), 1);
+        assert_eq!(a.transferred[0].id, id);
+        assert!(a.minted.is_empty());
+
+        // And the mint transaction reports the mint, not the transfer.
+        let m = query::tx_activity(&o, &[0x11; 32]);
+        assert_eq!(m.minted.len(), 1);
+        assert!(m.transferred.is_empty());
+    }
+
     /// Collectible events are recorded the same way and read back per owner.
     #[test]
     fn collectible_ownership_and_history_read_back() {

@@ -307,6 +307,124 @@ pub fn mint_terms(o: &Overlay, token: TokenKey, at_height: u64) -> Option<MintTe
     })
 }
 
+/// What the overlay did in one block.
+///
+/// Exists so a block page is one request rather than one per transaction. A
+/// block with two hundred transactions asking "is this one a collectible?" two
+/// hundred times would make the index the slowest part of the explorer, and the
+/// event log already has the answer indexed by height.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BlockActivity {
+    /// Collectibles minted in this block, newest first within the block.
+    pub minted: Vec<NfdView>,
+    /// Collectibles that changed hands.
+    pub transferred: Vec<NfdView>,
+    /// Collections created.
+    pub collections: Vec<[u8; 32]>,
+    /// Tokens whose state moved, and how.
+    pub token_events: Vec<HistoryEntry>,
+}
+
+impl BlockActivity {
+    pub fn is_empty(&self) -> bool {
+        self.minted.is_empty()
+            && self.transferred.is_empty()
+            && self.collections.is_empty()
+            && self.token_events.is_empty()
+    }
+}
+
+/// The same question, asked about one transaction.
+///
+/// A transaction page cannot answer this from its txid alone: a MINT's txid is
+/// the collectible's id, but a TRANSFER's is not, so "look it up as an id" finds
+/// mints and silently misses every transfer. The event log is keyed on the
+/// transaction that carried each record, which is the only thing that catches
+/// both.
+pub fn tx_activity(o: &Overlay, txid: &[u8; 32]) -> BlockActivity {
+    use crate::events::NfdEventKind;
+
+    let mut out = BlockActivity::default();
+
+    for e in o.log.nfd_events().filter(|e| &e.txid == txid) {
+        match e.kind {
+            NfdEventKind::Mint => {
+                if let Some(n) = nfd(o, &e.id) {
+                    out.minted.push(n);
+                }
+            }
+            NfdEventKind::Transfer => {
+                if let Some(n) = nfd(o, &e.id) {
+                    out.transferred.push(n);
+                }
+            }
+            NfdEventKind::CollectionCreate => out.collections.push(e.id),
+        }
+    }
+
+    for e in o.log.token_events().filter(|e| &e.txid == txid) {
+        out.token_events.push(HistoryEntry {
+            kind: match e.kind {
+                TokenEventKind::Issue => HistoryKind::Issue,
+                TokenEventKind::Mint => HistoryKind::Mint,
+                TokenEventKind::Burn => HistoryKind::Burn,
+                TokenEventKind::Transfer => HistoryKind::TransferOut,
+            },
+            token: e.token,
+            counterparty: e.to.or(e.from),
+            amount: e.amount,
+            height: e.height,
+            txid: e.txid,
+            block_time: e.block_time,
+        });
+    }
+
+    out
+}
+
+pub fn block_activity(o: &Overlay, height: u64) -> BlockActivity {
+    use crate::events::NfdEventKind;
+
+    let mut out = BlockActivity::default();
+
+    for e in o.log.nfd_events().filter(|e| e.height == height) {
+        match e.kind {
+            NfdEventKind::Mint => {
+                if let Some(n) = nfd(o, &e.id) {
+                    out.minted.push(n);
+                }
+            }
+            NfdEventKind::Transfer => {
+                if let Some(n) = nfd(o, &e.id) {
+                    out.transferred.push(n);
+                }
+            }
+            NfdEventKind::CollectionCreate => out.collections.push(e.id),
+        }
+    }
+
+    for e in o.log.token_events().filter(|e| e.height == height) {
+        out.token_events.push(HistoryEntry {
+            kind: match e.kind {
+                TokenEventKind::Issue => HistoryKind::Issue,
+                TokenEventKind::Mint => HistoryKind::Mint,
+                TokenEventKind::Burn => HistoryKind::Burn,
+                // No asker, so no direction to derive. A block page is showing
+                // what the block did, not what it did to anyone in particular.
+                TokenEventKind::Transfer => HistoryKind::TransferOut,
+            },
+            token: e.token,
+            counterparty: e.to.or(e.from),
+            amount: e.amount,
+            height: e.height,
+            txid: e.txid,
+            block_time: e.block_time,
+        });
+    }
+
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Collectibles
 // ---------------------------------------------------------------------------
@@ -328,6 +446,69 @@ pub fn nfd(o: &Overlay, id: &[u8; 32]) -> Option<NfdView> {
         collection_id: n.collection_id,
         mint_height: n.mint_height,
     })
+}
+
+/// The most recently minted collectibles, newest first.
+///
+/// Walks the event log rather than the ledger because the ledger is a map with
+/// no notion of order, and "latest" is the first thing any explorer front page
+/// wants. The log is already in block order, so this is a scan and not a sort.
+pub fn recent_nfds(o: &Overlay, limit: usize) -> Vec<NfdView> {
+    use crate::events::NfdEventKind;
+    o.log
+        .nfd_events()
+        .filter(|e| e.kind == NfdEventKind::Mint)
+        .filter_map(|e| nfd(o, &e.id))
+        .take(limit)
+        .collect()
+}
+
+/// Free-text search over collectibles.
+///
+/// Deliberately narrow: an id prefix, or an owner. There is no name to search
+/// because the chain carries none, and pretending otherwise by matching against
+/// off-chain metadata we have not fetched would return results the index cannot
+/// stand behind.
+pub fn search_nfds(o: &Overlay, needle: &str, limit: usize) -> Vec<NfdView> {
+    let needle = needle.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return recent_nfds(o, limit);
+    }
+
+    let by_owner = crate::query::hex_to_addr(&needle);
+
+    o.log
+        .nfd_events()
+        .filter_map(|e| nfd(o, &e.id))
+        .filter(|n| {
+            if let Some(a) = by_owner {
+                return n.owner == a;
+            }
+            hex_lower(&n.id).starts_with(&needle)
+                || n.collection_id.map(|c| hex_lower(&c) == needle).unwrap_or(false)
+        })
+        .take(limit)
+        .collect()
+}
+
+fn hex_lower(b: &[u8; 32]) -> String {
+    // Display order, matching what a user copies out of the explorer.
+    b.iter().rev().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Parse the `kind:hash160` form the API emits for addresses, so a search can
+/// round-trip a value the user copied off one of our own pages.
+pub fn hex_to_addr(s: &str) -> Option<AddrKey> {
+    let (kind, hash) = s.split_once(':')?;
+    let kind: u8 = kind.parse().ok()?;
+    if hash.len() != 40 {
+        return None;
+    }
+    let mut out = [0u8; 20];
+    for i in 0..20 {
+        out[i] = u8::from_str_radix(hash.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some((kind, out))
 }
 
 pub fn nfds_owned_by(o: &Overlay, addr: AddrKey) -> Vec<NfdView> {

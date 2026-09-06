@@ -45,6 +45,12 @@ pub mod store;
 #[cfg(feature = "rpc")]
 pub mod api;
 
+#[cfg(feature = "rpc")]
+pub mod daemon;
+
+#[cfg(feature = "rpc")]
+pub use daemon::run_daemon;
+
 pub use driver::{BlockInput, BlockSummary, Overlay, ScanError, TxPayload};
 
 /// Blocks Divi produces per day at its 60-second target. Useful for reporting

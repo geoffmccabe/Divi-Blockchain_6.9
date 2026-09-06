@@ -32,7 +32,6 @@ use dmt_indexer::ledger::state::AddrKey;
 use serde_json::{json, Value};
 
 use crate::driver::Overlay;
-use crate::events::TokenKey;
 use crate::query;
 use crate::rpc::addr_from_str;
 use crate::store::sync_state;
@@ -188,6 +187,39 @@ fn route(path: &str, qs: &str, shared: &Shared) -> (u16, Value) {
             },
         },
 
+        // One request per block page, rather than one per transaction in it.
+        ("block", h) => match h.parse::<u64>() {
+            Err(_) => Err((400, "block must be a height")),
+            Ok(height) => {
+                let a = query::block_activity(&overlay, height);
+                Ok(json!({
+                    "height": height,
+                    "minted": a.minted.iter().map(nfd_json).collect::<Vec<_>>(),
+                    "transferred": a.transferred.iter().map(nfd_json).collect::<Vec<_>>(),
+                    "collections": a.collections.iter().map(hash_hex).collect::<Vec<_>>(),
+                    "tokenEvents": a.token_events.iter().map(history_json).collect::<Vec<_>>(),
+                    "empty": a.is_empty(),
+                }))
+            }
+        },
+
+        // A transaction page needs this rather than looking its txid up as a
+        // collectible id: that finds mints and misses every transfer.
+        ("tx", id) => match hash_arg(id) {
+            None => Err((400, "txid must be 64 hex characters")),
+            Some(txid) => {
+                let a = query::tx_activity(&overlay, &txid);
+                Ok(json!({
+                    "txid": id,
+                    "minted": a.minted.iter().map(nfd_json).collect::<Vec<_>>(),
+                    "transferred": a.transferred.iter().map(nfd_json).collect::<Vec<_>>(),
+                    "collections": a.collections.iter().map(hash_hex).collect::<Vec<_>>(),
+                    "tokenEvents": a.token_events.iter().map(history_json).collect::<Vec<_>>(),
+                    "empty": a.is_empty(),
+                }))
+            }
+        },
+
         ("nfd", id) => match hash_arg(id) {
             None => Err((400, "id must be 64 hex characters")),
             Some(h) => match query::nfd(&overlay, &h) {
@@ -196,12 +228,20 @@ fn route(path: &str, qs: &str, shared: &Shared) -> (u16, Value) {
             },
         },
 
-        ("nfds", _) => match single_address(qs) {
-            Err(bad) => Err((400, bad)),
-            Ok(a) => Ok(json!({
-                "nfds": query::nfds_owned_by(&overlay, a).iter().map(nfd_json).collect::<Vec<_>>(),
-            })),
-        },
+        // With an owner: what that address holds. With a q: a search. With
+        // neither: the latest mints, which is what a front page wants.
+        ("nfds", _) => {
+            let limit = limit_of(qs, 60);
+            let list = match (param(qs, "owner"), param(qs, "q")) {
+                (Some(_), _) => match single_address(qs) {
+                    Err(bad) => return finish(Err((400, bad)), meta),
+                    Ok(a) => query::nfds_owned_by(&overlay, a),
+                },
+                (None, Some(q)) => query::search_nfds(&overlay, &percent_decode(q), limit),
+                (None, None) => query::recent_nfds(&overlay, limit),
+            };
+            Ok(json!({ "nfds": list.iter().map(nfd_json).collect::<Vec<_>>() }))
+        }
 
         ("collection", id) => match hash_arg(id) {
             None => Err((400, "id must be 64 hex characters")),
@@ -224,6 +264,10 @@ fn route(path: &str, qs: &str, shared: &Shared) -> (u16, Value) {
         _ => Err((404, "no such route")),
     };
 
+    finish(payload, meta)
+}
+
+fn finish(payload: Result<Value, (u16, &str)>, meta: Value) -> (u16, Value) {
     match payload {
         Err((status, message)) => (status, json!({ "error": message, "sync": meta })),
         Ok(Value::Object(mut map)) => {
@@ -232,6 +276,41 @@ fn route(path: &str, qs: &str, shared: &Shared) -> (u16, Value) {
         }
         Ok(other) => (200, json!({ "data": other, "sync": meta })),
     }
+}
+
+/// Minimal percent-decoding for a search term.
+///
+/// Only what a query string needs: `%XX` and `+`. Not a general URI decoder,
+/// and deliberately not pretending to be one.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                match u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    Ok(b) => {
+                        out.push(b);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +464,39 @@ fn respond(stream: &mut TcpStream, status: u16, body: &Value) -> std::io::Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percent_decoding_handles_what_a_search_box_sends() {
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode("a+b"), "a b");
+        assert_eq!(percent_decode("%41%42"), "AB");
+        // A stray percent is kept rather than swallowed: mangling a search term
+        // silently is worse than returning nothing for it.
+        assert_eq!(percent_decode("100%"), "100%");
+    }
+
+    #[test]
+    fn addresses_round_trip_through_the_form_we_emit() {
+        let a: AddrKey = (0, [0xab; 20]);
+        let shown = addr_json(a);
+        let text = shown.as_str().unwrap();
+        assert_eq!(query::hex_to_addr(text), Some(a));
+        assert_eq!(query::hex_to_addr("nonsense"), None);
+        assert_eq!(query::hex_to_addr("0:tooshort"), None);
+    }
+
+    #[test]
+    fn nfds_answers_three_different_questions() {
+        let shared = Shared::new(Overlay::new());
+        // No parameters: the latest mints, empty here but a valid answer.
+        let (status, body) = route("/nfds", "", &shared);
+        assert_eq!(status, 200);
+        assert!(body["nfds"].as_array().unwrap().is_empty());
+        // A search term is accepted.
+        assert_eq!(route("/nfds", "q=abc", &shared).0, 200);
+        // A bad owner is still refused rather than silently treated as a search.
+        assert_eq!(route("/nfds", "owner=notanaddress", &shared).0, 400);
+    }
 
     #[test]
     fn query_parameters_are_read_and_limits_are_capped() {
