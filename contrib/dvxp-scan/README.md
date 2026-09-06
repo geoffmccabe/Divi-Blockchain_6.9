@@ -12,8 +12,15 @@ A library, with a daemon on top. The library half is the important half.
   dependencies beyond the rules crates, fully unit tested.
 - **`rpc`** (feature, on by default) — a throttled Divi JSON-RPC client and the
   block-to-records reduction.
+- **`events`** — the history the ledgers do not keep. They hold what is true
+  now; "show me my activity" had nothing to read.
+- **`query`** — pure. The questions a wallet and an explorer actually ask,
+  shaped to `DMT-WALLET-INTERFACE.md` §2.
 - **`store`** (feature) — publishing progress atomically for readers.
-- **`bin/divi-overlay-indexer`** — catch up, then follow the tip forever.
+- **`api`** (feature) — a small read-only HTTP layer over `query`. Hand-rolled,
+  no framework: DD69 vendors this crate and has to build it standalone.
+- **`bin/divi-overlay-indexer`** — catch up, then follow the tip forever, and
+  serve the API throughout.
 
 The wallet embeds the library and drives it from its own node connection:
 
@@ -43,6 +50,33 @@ Three things, all of which only bite in production:
    the public explorer offline, so throttling is on by default and the daemon
    yields between calls.
 
+## The read API
+
+Loopback by default (`API_BIND=127.0.0.1:8710`, empty disables it). Every route
+is a GET; nothing here can change state.
+
+```
+/sync                      where the index is, and whether to trust it
+/tokens                    every token known
+/token/{height}:{tx}       one token, with its history
+/balances?addresses=D..,D..
+/history?addresses=D..&limit=50
+/ticker/{name}             taken, by whom, and what it costs
+/mint-terms/{height}:{tx}  whether a claim would be accepted right now
+/nfd/{id}                  one collectible
+/nfds?owner=D..            what an address holds
+/collection/{id}           a collection and its members
+```
+
+**Every response carries sync state**, including the errors: `height`, `tip`,
+`behind`, `fingerprint`, `halted`, `trustworthy`. A client must never present
+balances as live when they are not, and the only way to be sure it can tell is
+to make the answer impossible to read without the caveat attached.
+
+**Amounts are strings.** A token with 8 decimals and a large supply exceeds what
+a JavaScript number holds exactly, and rounding someone's balance in transit is
+not acceptable.
+
 ## Invariants
 
 **A block applies completely or not at all.** Every payload is classified before
@@ -55,6 +89,16 @@ me" from "the node went away" and not restart-loop on the former.
 
 **Skips are reported, never dropped.** A record the rules reject is a fact about
 the chain. The old scanner discarded them.
+
+## The treasury guard
+
+The daemon refuses to start while the DMT treasury address is the all-zero
+placeholder. This is not caution for its own sake: the token creation fee is
+checked against that address, so in the placeholder state a payment to an
+address nobody controls satisfies the fee, and an index run against a real chain
+would record issuances that never paid for anything. `dmt-indexer` has always
+provided `treasury_is_configured()`; nothing called it until now. Set
+`ALLOW_PLACEHOLDER_TREASURY=1` for regtest.
 
 ## Running it
 

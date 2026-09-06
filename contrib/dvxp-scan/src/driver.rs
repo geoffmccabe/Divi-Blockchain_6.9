@@ -36,6 +36,23 @@ use dvxp_core::registry::{Fingerprint, RecordContext, RecordHandler};
 use dvxp_core::{Halt, Ignored, TYPE_DMT, TYPE_NFD};
 use nfd_indexer::{NfdLedger, Undo as NfdUndo};
 
+use crate::events::{EventLog, NfdEvent, NfdEventKind, TokenEvent, TokenEventKind};
+
+/// NFD subtypes the driver needs to recognise to record an event. The rules for
+/// them live in `nfd-indexer`; these are only for describing what happened.
+const NFD_SUB_MINT: u8 = 0x01;
+const NFD_SUB_TRANSFER: u8 = 0x02;
+const NFD_SUB_COLLECTION: u8 = 0x04;
+
+fn addr21_key(p: &[u8]) -> Option<dmt_indexer::ledger::state::AddrKey> {
+    if p.len() < 21 {
+        return None;
+    }
+    let mut h = [0u8; 20];
+    h.copy_from_slice(&p[1..21]);
+    Some((p[0], h))
+}
+
 /// Tag bytes prefixing each protocol's slice of a block's deltas, so the
 /// combined pre-image is unambiguous even when one protocol contributes
 /// nothing. Without them, "NFD changed X, DMT changed nothing" and "NFD changed
@@ -125,6 +142,9 @@ struct AppliedBlock {
 pub struct Overlay {
     pub nfd: NfdLedger,
     pub dmt: DmtChain,
+    /// History, which neither ledger keeps: they hold what is true now, not
+    /// what happened.
+    pub log: EventLog,
     fingerprint: Fingerprint,
     history: VecDeque<AppliedBlock>,
     tip: Option<u64>,
@@ -142,6 +162,7 @@ impl Overlay {
         Self {
             nfd: NfdLedger::new(),
             dmt: DmtChain::new(),
+            log: EventLog::new(),
             fingerprint: Fingerprint::genesis(),
             history: VecDeque::new(),
             tip: None,
@@ -241,6 +262,7 @@ impl Overlay {
                     Ok(delta) => {
                         nfd_deltas.extend_from_slice(&delta);
                         applied += 1;
+                        self.record_nfd_event(&rec, &ctx, tx);
                     }
                     Err(ignored) => skipped.push((tx.tx_index, ignored)),
                 },
@@ -268,8 +290,17 @@ impl Overlay {
                                 payments: tx.payments.clone(),
                                 burned: tx.burned,
                             };
+                            // Balances before, so a mint's real credit can be
+                            // measured rather than assumed. A claim at the cap
+                            // boundary is deliberately a SHORT fill, so the
+                            // token's advertised per-mint size is not always
+                            // what actually arrived.
+                            let before = self.dmt.ledger.state.balances.clone();
                             match self.dmt.ledger.apply(&r, &tctx) {
-                                Ok(()) => applied += 1,
+                                Ok(()) => {
+                                    applied += 1;
+                                    self.record_token_event(&r, &tctx, tx, block.time, &before);
+                                }
                                 Err(ignored) => skipped.push((tx.tx_index, ignored)),
                             }
                         }
@@ -314,6 +345,131 @@ impl Overlay {
         })
     }
 
+    /// Describe what a successfully applied token record did.
+    ///
+    /// Only records that move units produce an event. Lock supply, issuer
+    /// transfer, ticker transfer and name commit change a token's terms rather
+    /// than anyone's holdings, and they are visible in the token's metadata
+    /// where they belong. Inventing balance events for them would put lines in
+    /// a user's history that never touched their balance.
+    fn record_token_event(
+        &mut self,
+        rec: &dmt_indexer::Record,
+        tctx: &TxContext,
+        tx: &TxPayload,
+        block_time: i64,
+        balances_before: &BTreeMap<((u64, u32), AddrKey), u64>,
+    ) {
+        use dmt_indexer::ledger::state::token_key;
+        use dmt_indexer::Record as R;
+
+        let sender = dmt_indexer::ledger::state::addr_key(tctx.sender);
+        // Collected first, then handed to the log in one go: the closure needs
+        // the ledger for a mint's measured amount, and cannot hold the log at
+        // the same time.
+        let mut out: Vec<TokenEvent> = Vec::new();
+        // A token is keyed by (height, tx_index); the ledger never sees the
+        // transaction hash, but every explorer link needs it.
+        let mut genesis: Option<((u64, u32), [u8; 32])> = None;
+        let mut push = |kind, token, from, to, amount| {
+            out.push(TokenEvent {
+                token,
+                kind,
+                from,
+                to,
+                amount,
+                height: tctx.height,
+                tx_index: tctx.tx_index,
+                txid: tx.txid,
+                block_time,
+            });
+        };
+
+        match rec {
+            R::Issue(i) => {
+                let token = token_key(tctx.token_id());
+                genesis = Some((token, tx.txid));
+                if i.premine > 0 {
+                    push(TokenEventKind::Issue, token, None, Some(sender), i.premine);
+                }
+            }
+            R::Mint(m) => {
+                let token = token_key(m.token);
+                let to = m
+                    .recipient
+                    .map(dmt_indexer::ledger::state::addr_key)
+                    .unwrap_or(sender);
+                // Measured, not assumed: a claim that runs into the cap is a
+                // deliberate short fill, so the token's advertised per-mint size
+                // is not always what arrived.
+                let before = balances_before.get(&(token, to)).copied().unwrap_or(0);
+                let after = self.dmt.ledger.state.balances.get(&(token, to)).copied().unwrap_or(0);
+                let credited = after.saturating_sub(before);
+                if credited > 0 {
+                    push(TokenEventKind::Mint, token, None, Some(to), credited);
+                }
+            }
+            R::Transfer(t) => {
+                // One event per payout. An airdrop to two hundred addresses is
+                // two hundred events, which is what each of those holders needs
+                // to see in their own history.
+                for group in &t.groups {
+                    let token = token_key(group.token);
+                    for payout in &group.payouts {
+                        let to = dmt_indexer::ledger::state::addr_key(payout.to);
+                        push(TokenEventKind::Transfer, token, Some(sender), Some(to), payout.amount);
+                    }
+                }
+            }
+            R::Burn(b) => {
+                push(TokenEventKind::Burn, token_key(b.token), Some(sender), None, b.amount);
+            }
+            R::NameCommit(_) | R::LockSupply(_) | R::IssuerTransfer(_) | R::TickerTransfer(_) => {}
+        }
+
+        drop(push);
+        if let Some((token, txid)) = genesis {
+            self.log.record_token_genesis(token, txid);
+        }
+        for e in out {
+            self.log.push_token(e);
+        }
+    }
+
+    /// Describe what a successfully applied collectible record did.
+    ///
+    /// The bodies are re-read here rather than threaded out of `nfd-indexer`,
+    /// which returns only its fingerprint delta. Re-reading is safe because the
+    /// record already applied cleanly, so the layout is known good; the only
+    /// cost is a few bounds checks.
+    fn record_nfd_event(&mut self, rec: &dvxp_core::Record, ctx: &RecordContext, tx: &TxPayload) {
+        let sender = ctx.sender.map(dmt_indexer::ledger::state::addr_key);
+        let (kind, id, from, to) = match rec.subtype {
+            NFD_SUB_MINT => (NfdEventKind::Mint, ctx.txid, None, sender),
+            NFD_SUB_TRANSFER => {
+                let Some(id) = rec.body.get(0..32) else { return };
+                let mut mint_txid = [0u8; 32];
+                mint_txid.copy_from_slice(id);
+                let to = rec.body.get(32..53).and_then(addr21_key);
+                (NfdEventKind::Transfer, mint_txid, sender, to)
+            }
+            NFD_SUB_COLLECTION => (NfdEventKind::CollectionCreate, ctx.txid, None, sender),
+            // Key announce changes no ownership, so it is not an event about a
+            // collectible.
+            _ => return,
+        };
+
+        self.log.push_nfd(NfdEvent {
+            id,
+            kind,
+            from,
+            to,
+            height: ctx.height,
+            txid: tx.txid,
+            block_time: ctx.block_time,
+        });
+    }
+
     /// Roll every protocol back to the state after `height`.
     ///
     /// Divi hard-caps reorgs at 100 blocks and the window retains 200, so this
@@ -346,6 +502,9 @@ impl Overlay {
             let block = self.history.pop_back().expect("checked above");
             self.nfd.rollback_block(block.nfd_undo);
         }
+        // An event that outlived its block would report activity the chain no
+        // longer contains.
+        self.log.rollback_above(height);
 
         self.fingerprint = self
             .history
@@ -574,5 +733,252 @@ mod tests {
             o.apply_block(&empty(h, (h % 251) as u8)).unwrap();
         }
         assert_eq!(o.history.len(), UNDO_DEPTH);
+    }
+
+    // ---- end to end: records in, queries out ---------------------------
+    //
+    // These build real record bodies rather than poking the ledgers, so they
+    // exercise the whole path: envelope, classify, route, apply, journal,
+    // fingerprint, query. Encoders live here because the write path (Phase 5)
+    // does not exist yet; when it does, these should switch to it so the tests
+    // stop being a second implementation of the same layout.
+
+    use dvxp_core::varint::write_varint;
+
+    fn issue_body(premine: u64) -> Vec<u8> {
+        let mut b = vec![0u8]; // flags: no ticker, no open mint
+        b.push(0); // decimals
+        b.push(0); // ticker_len: 0 means no ticker, so no salt follows
+        write_varint(&mut b, premine);
+        b
+    }
+
+    fn transfer_body(token: (u64, u32), amount: u64, to: Address) -> Vec<u8> {
+        let mut b = Vec::new();
+        write_varint(&mut b, 1); // one group
+        write_varint(&mut b, token.0); // first group's height is an absolute delta
+        write_varint(&mut b, token.1 as u64);
+        write_varint(&mut b, 1); // one recipient
+        write_varint(&mut b, amount);
+        to.write(&mut b);
+        b
+    }
+
+    fn burn_body(token: (u64, u32), amount: u64) -> Vec<u8> {
+        let mut b = Vec::new();
+        write_varint(&mut b, token.0);
+        write_varint(&mut b, token.1 as u64);
+        write_varint(&mut b, amount);
+        b
+    }
+
+    fn key(a: Address) -> AddrKey {
+        dmt_indexer::ledger::state::addr_key(a)
+    }
+
+    /// A transaction that has paid the token creation fee.
+    ///
+    /// Note what this exposes: the fee is checked against
+    /// `config::treasury()`, which is still the all-zero placeholder, so a
+    /// payment to an unspendable address currently satisfies it. That is
+    /// exactly why `treasury_is_configured()` exists, and why the daemon now
+    /// refuses to start while it returns false.
+    fn tx_with_fee(tx_index: u32, txid: u8, payload: Vec<u8>, sender: Address) -> TxPayload {
+        let mut payments = BTreeMap::new();
+        payments.insert(
+            dmt_indexer::ledger::state::addr_key(dmt_indexer::config::treasury()),
+            dmt_indexer::fees::token_creation_fee_duffs(),
+        );
+        TxPayload { tx_index, txid: [txid; 32], payload, sender: Some(sender), payments, burned: 0 }
+    }
+
+    /// Issue 1000, send 300 away, burn 100. Then ask the questions a wallet
+    /// asks and check every answer.
+    #[test]
+    fn a_token_can_be_issued_sent_burned_and_then_queried() {
+        use crate::query;
+
+        let mut o = Overlay::new();
+        let issuer = addr(7);
+        let other = addr(9);
+
+        // Block 1: issue. The token's id is (height, tx_index) of this record.
+        o.apply_block(&block(
+            1,
+            1,
+            vec![tx_with_fee(0, 0xaa, envelope(TYPE_DMT, 0x01, &issue_body(1000)), issuer)],
+        ))
+        .unwrap();
+        let token = (1u64, 0u32);
+
+        assert_eq!(
+            query::balances(&o, &[key(issuer)]),
+            vec![query::TokenBalance { token, amount: 1000 }]
+        );
+
+        let meta = query::token_meta(&o, token).expect("the token exists");
+        assert_eq!(meta.total_supply, 1000);
+        assert_eq!(meta.issuer, key(issuer));
+        assert_eq!(
+            meta.genesis_txid,
+            Some([0xaa; 32]),
+            "the issuing txid is recorded, since the ledger never sees it"
+        );
+
+        // Block 2: send 300 to someone else.
+        o.apply_block(&block(
+            2,
+            2,
+            vec![tx(
+                0,
+                0xbb,
+                envelope(TYPE_DMT, 0x02, &transfer_body(token, 300, other)),
+                Some(issuer),
+            )],
+        ))
+        .unwrap();
+
+        // Block 3: burn 100 of what is left.
+        o.apply_block(&block(
+            3,
+            3,
+            vec![tx(0, 0xcc, envelope(TYPE_DMT, 0x05, &burn_body(token, 100)), Some(issuer))],
+        ))
+        .unwrap();
+
+        assert_eq!(
+            query::balances(&o, &[key(issuer)]),
+            vec![query::TokenBalance { token, amount: 600 }],
+            "1000 issued, 300 sent, 100 burned"
+        );
+        assert_eq!(
+            query::balances(&o, &[key(other)]),
+            vec![query::TokenBalance { token, amount: 300 }]
+        );
+        assert_eq!(
+            query::token_meta(&o, token).unwrap().total_supply,
+            900,
+            "a burn reduces supply; a transfer does not"
+        );
+
+        // History, newest first, from the issuer's side.
+        let mine = query::history(&o, &[key(issuer)], 50);
+        let kinds: Vec<_> = mine.iter().map(|h| h.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![query::HistoryKind::Burn, query::HistoryKind::TransferOut, query::HistoryKind::Issue]
+        );
+        assert_eq!(mine[1].counterparty, Some(key(other)));
+
+        // The same transfer, from the other side, is an incoming line.
+        let theirs = query::history(&o, &[key(other)], 50);
+        assert_eq!(theirs.len(), 1, "they were not party to the issue or the burn");
+        assert_eq!(theirs[0].kind, query::HistoryKind::TransferIn);
+        assert_eq!(theirs[0].counterparty, Some(key(issuer)));
+        assert_eq!(theirs[0].amount, 300);
+    }
+
+    /// A reorg must take the history with it. An event log that outlived its
+    /// block would show a user activity the chain no longer contains.
+    #[test]
+    fn rolling_back_discards_the_events_and_the_genesis_txid() {
+        use crate::query;
+
+        let mut o = Overlay::new();
+        let issuer = addr(7);
+        let other = addr(9);
+
+        // An empty block first, so there is something below the issue to roll
+        // back to. You cannot unwind past the earliest block you ever applied,
+        // and the driver says so rather than guessing.
+        o.apply_block(&empty(1, 1)).unwrap();
+
+        o.apply_block(&block(
+            2,
+            2,
+            vec![tx_with_fee(0, 0xaa, envelope(TYPE_DMT, 0x01, &issue_body(1000)), issuer)],
+        ))
+        .unwrap();
+        let token = (2u64, 0u32);
+
+        o.apply_block(&block(
+            3,
+            3,
+            vec![tx(
+                0,
+                0xbb,
+                envelope(TYPE_DMT, 0x02, &transfer_body(token, 300, other)),
+                Some(issuer),
+            )],
+        ))
+        .unwrap();
+        assert_eq!(query::history(&o, &[key(other)], 50).len(), 1);
+
+        o.rollback_to(2).unwrap();
+
+        assert!(
+            query::history(&o, &[key(other)], 50).is_empty(),
+            "the transfer's event goes with its block"
+        );
+        assert!(query::balances(&o, &[key(other)]).is_empty());
+        assert_eq!(
+            query::balances(&o, &[key(issuer)]),
+            vec![query::TokenBalance { token, amount: 1000 }],
+            "and the units come back"
+        );
+        assert!(
+            query::token_meta(&o, token).unwrap().genesis_txid.is_some(),
+            "block 2 survived, so its token keeps its txid"
+        );
+
+        // Now discard the issue too.
+        o.rollback_to(1).unwrap();
+        assert!(query::all_tokens(&o).is_empty());
+        assert_eq!(o.log.token_event_count(), 0);
+        assert_eq!(
+            query::token_meta(&o, token),
+            None,
+            "the token and its genesis txid are both gone"
+        );
+    }
+
+    /// Collectible events are recorded the same way and read back per owner.
+    #[test]
+    fn collectible_ownership_and_history_read_back() {
+        use crate::query;
+
+        let mut o = Overlay::new();
+        let minter = addr(7);
+        let buyer = addr(9);
+
+        o.apply_block(&block(
+            1,
+            1,
+            vec![tx(0, 0x11, envelope(TYPE_NFD, 0x01, &nfd_mint()), Some(minter))],
+        ))
+        .unwrap();
+        let id = [0x11u8; 32];
+
+        assert_eq!(query::nfds_owned_by(&o, key(minter)).len(), 1);
+        assert_eq!(query::nfd(&o, &id).unwrap().owner, key(minter));
+
+        // Transfer it: 32-byte id, 21-byte new owner, 32-byte wrapkey pointer.
+        let mut body = id.to_vec();
+        let mut packed = Vec::new();
+        buyer.write(&mut packed);
+        body.extend_from_slice(&packed);
+        body.extend_from_slice(&[0u8; 32]);
+
+        o.apply_block(&block(
+            2,
+            2,
+            vec![tx(0, 0x22, envelope(TYPE_NFD, 0x02, &body), Some(minter))],
+        ))
+        .unwrap();
+
+        assert_eq!(query::nfd(&o, &id).unwrap().owner, key(buyer));
+        assert!(query::nfds_owned_by(&o, key(minter)).is_empty());
+        assert_eq!(query::nfds_owned_by(&o, key(buyer)).len(), 1);
+        assert_eq!(o.log.nfd_event_count(), 2, "the mint and the transfer");
     }
 }

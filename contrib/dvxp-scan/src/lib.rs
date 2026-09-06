@@ -33,12 +33,17 @@
 //! no undo log at all.
 
 pub mod driver;
+pub mod events;
+pub mod query;
 
 #[cfg(feature = "rpc")]
 pub mod rpc;
 
 #[cfg(feature = "rpc")]
 pub mod store;
+
+#[cfg(feature = "rpc")]
+pub mod api;
 
 pub use driver::{BlockInput, BlockSummary, Overlay, ScanError, TxPayload};
 
