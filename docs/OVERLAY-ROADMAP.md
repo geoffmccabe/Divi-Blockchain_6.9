@@ -144,7 +144,15 @@ collectibles pages say the index is unavailable.
 `dmt-indexer` gained that dependency when tokens and Divi Names started sharing
 ticker rules, and nothing re-ran the script afterwards.
 
-## Phase 4 — the collectibles grid in DD69 · NOT STARTED
+## Phase 4 — the collectibles grid in DD69 · DEFERRED by agreement
+
+Not started, deliberately. Geoff has not asked for the collectibles gallery, so
+building it now would be speculative. Agreed split with the builds lane for when
+he does: **this lane owns the in-process data layer** (`dvxp-scan` with
+`default-features = false`, driven from the supervisor's existing node
+connection, exposed as commands over `query::`), **the builds lane owns the UI**
+(`ImageGrid.tsx` and the wallet-side wiring). Neither reimplements the other's
+half.
 
 - **Reuse `ui/src/wallet/ImageGrid.tsx`** on `integration/all-features`, not the
   Community Apps grid. The builds lane has already built a data-agnostic grid
@@ -156,15 +164,39 @@ ticker rules, and nothing re-ran the script afterwards.
 - **Blocked sub-item:** "for sale" has no record type and no design. Open
   decision, see below.
 
-## Phase 5 — token write path · NOT STARTED
+## Phase 5 — token write path · HALF DONE 2026-Sep-06
 
-- Payload encoders in `dmt-indexer` for issue, transfer, mint, name commit, burn,
-  lock supply, issuer transfer. The crate owns encoding so the wallet cannot
-  drift from the indexer.
-- A validate-before-send check, answered locally before any DIVI is spent.
-- A token module in the DD69 supervisor beside `names.rs` and `poe.rs`, reusing
-  `dvxp.rs` for coin selection, signing and broadcast.
-- Swap the stub data layer, enable Send and Create.
+Commit `71b430285`.
+
+**Done, in the chain repo:**
+
+- **Payload encoders** for every record type. Each is tested by parsing its own
+  output back with the real parser, so the two halves provably agree.
+- **`validate::dry_run`**, which applies a record to a *clone* of the ledger and
+  reports what happened. Not a list of pre-flight checks: that would be a second
+  copy of the rules, and a wallet promising acceptance while the ledger disagrees
+  is worse than no check. `Verdict::explain()` returns a sentence for a person.
+- **The whole stack proven on a real chain.** A throwaway regtest node, real
+  records: issue 1000, transfer 300, burn 100, lock supply. Read back as supply
+  900, locked true, issuer 600, recipient 300, with the same transfer showing as
+  an out for one and an in for the other.
+
+**Two defects that only a real chain could have found:**
+
+1. **The scanner could not read any testnet or regtest address.** Mainnet version
+   bytes only, so every sender failed to resolve, every record was skipped for
+   having no sender, and the overlay was untestable off mainnet. Fixed.
+2. **⚠ The coin-selection trap.** A record's sender is the address funding
+   `vin[0]`. Ordinary coin selection picks a change address holding no tokens, so
+   a well-formed record is mined, costs a fee, and is **ignored** with nothing
+   said. The first run lost three of four records this way. **Coin selection for
+   a token record must be constrained to the address that holds the tokens, and
+   change must return to it.** Written down in `encode.rs` where whoever writes
+   the send will read it.
+
+**Still to do, and it needs the builds lane:** a token module in the DD69
+supervisor beside `names.rs` and `poe.rs`, then swapping the stub data layer and
+enabling Send and Create.
 
 ## Phase 6 — the registry root on DIVA · NOT STARTED
 
