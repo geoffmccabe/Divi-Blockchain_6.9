@@ -41,10 +41,12 @@
 //! Adding a new record type is a local change — see [`record`].
 
 pub mod config;
+pub mod encode;
 pub mod fees;
 pub mod ledger;
 pub mod record;
 pub mod ticker;
+pub mod validate;
 
 pub use record::{Record, TokenId};
 

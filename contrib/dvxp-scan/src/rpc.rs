@@ -305,6 +305,22 @@ pub fn hash_bytes(hex: &str) -> [u8; 32] {
     out
 }
 
+/// Divi's address version bytes, all four of them.
+///
+/// Mainnet only was a real bug: the scanner could not resolve a single sender on
+/// testnet or regtest, so every record was skipped for having no sender, and the
+/// overlay was untestable on exactly the networks you would want to test it on
+/// before going near mainnet.
+///
+/// Accepting all four does NOT weaken the guard against other chains. The kind
+/// byte stored on-chain is a protocol-level type, P2PKH or P2SH, not a network
+/// prefix; the network is context the reader already has. Bitcoin's 0 and 5 stay
+/// refused, which is the case that actually matters.
+pub const MAIN_P2PKH: u8 = 30;
+pub const MAIN_P2SH: u8 = 13;
+pub const TEST_P2PKH: u8 = 139;
+pub const TEST_P2SH: u8 = 19;
+
 /// Base58Check to a canonical 21-byte address.
 ///
 /// Only Divi's own version bytes are accepted. An address from another chain is
@@ -327,8 +343,10 @@ pub fn addr_from_str(s: &str) -> Option<Address> {
         }
     }
     let kind = match num[0] {
-        30 => ADDRESS_P2PKH, // Divi P2PKH: addresses beginning "D"
-        13 => ADDRESS_P2SH,
+        MAIN_P2PKH => ADDRESS_P2PKH, // mainnet, addresses beginning "D"
+        MAIN_P2SH => ADDRESS_P2SH,
+        TEST_P2PKH => ADDRESS_P2PKH, // testnet and regtest, "x" or "y"
+        TEST_P2SH => ADDRESS_P2SH,
         _ => return None,
     };
     let mut hash160 = [0u8; 20];
@@ -393,6 +411,17 @@ mod tests {
     fn refuses_addresses_from_other_chains() {
         // A Bitcoin P2PKH address: right shape, wrong version byte.
         assert!(addr_from_str("1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2").is_none());
+    }
+
+    /// Regtest and testnet addresses must resolve, or the scanner cannot see a
+    /// sender on either network and skips every record for having none. That
+    /// made the overlay untestable anywhere except mainnet, which is the one
+    /// place you would want it proven before, not after.
+    #[test]
+    fn decodes_regtest_and_testnet_addresses() {
+        let a = addr_from_str("yCsJe6YGB4My3xiQjyUU4dC2Gc7v1H8Cna")
+            .expect("a regtest address must resolve");
+        assert_eq!(a.kind, ADDRESS_P2PKH, "the on-chain kind is P2PKH regardless of network");
     }
 
     #[test]
