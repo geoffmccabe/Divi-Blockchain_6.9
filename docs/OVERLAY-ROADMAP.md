@@ -194,6 +194,13 @@ Commit `71b430285`.
    change must return to it.** Written down in `encode.rs` where whoever writes
    the send will read it.
 
+   **There is already a fix in the tree.** `dvxp::select_coins(from)` in DD69's
+   supervisor pins a coin at the author's address as the first input, returns
+   change there, and errors rather than funding from elsewhere. The HRA lane
+   wrote it after hitting this same trap in live Divi Names testing, so Names and
+   PoE are both clear. The token module must call it rather than doing its own
+   coin selection.
+
 **Still to do, and it needs the builds lane:** a token module in the DD69
 supervisor beside `names.rs` and `poe.rs`, then swapping the stub data layer and
 enabling Send and Create.
