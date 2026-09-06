@@ -85,8 +85,15 @@ reported `trustworthy: false` while behind and `true` once current, then followe
 new blocks as the miner produced them. All routes exercised, bad addresses and
 non-GET refused.
 
-The wallet still embeds its own indexer rather than trusting this API for
-balances. The API is for speed and for everyone else.
+**The wallet should not use the HTTP API at all.** DD69's CSP deliberately blocks
+the webview from reaching any network address, including loopback, so all I/O
+goes through Rust. The builds lane's first instinct was a Rust command proxying
+to the indexer's HTTP port, but there is a better answer and it is why this crate
+was built library-first: DD69 depends on `dvxp-scan` with
+`default-features = false`, drives the driver in-process from the supervisor's
+existing node connection, and calls `query::` directly. No second process to
+install and supervise, no port, no proxy, and no CSP question. The HTTP API is
+for the explorer and anything outside the wallet.
 
 ## Phase 3 — collectibles visible on scan.divi.love · NOT STARTED
 
