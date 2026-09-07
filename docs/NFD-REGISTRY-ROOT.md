@@ -62,8 +62,7 @@ kind is a different owner and must hash differently.
 
 ## 5. Tree: RFC 6962
 
-The construction is **RFC 6962** (Certificate Transparency), which the DIVA lane
-asked for so that audited reference verifiers apply.
+The construction is **RFC 6962** (Certificate Transparency).
 
 ```
 leaf_hash(entry)      = SHA256(0x00 || entry_bytes)          // 53 bytes in
@@ -86,6 +85,30 @@ The reference implementation builds bottom-up (pair, promote, repeat) rather tha
 top-down. That is proven equal to RFC 6962's recursive definition for every leaf
 count from 1 to 64 by the test `the_tree_is_rfc_6962`, which checks it against an
 independent implementation of the RFC's own wording.
+
+### ⚠ Do not paste OpenZeppelin `MerkleProof`
+
+An earlier draft of this document said audited reference verifiers apply, which
+was half true and dangerously so. Flagged by the DIVA lane, 2026-Sep-06, and
+worth stating precisely because the failure would be a verifier that looks
+finished and is wrong.
+
+**The common Solidity Merkle verifier, OpenZeppelin's `MerkleProof`, will NOT
+work against this format.** Three incompatibilities, any one of which is fatal:
+
+| OpenZeppelin `MerkleProof` | This format |
+|---|---|
+| `keccak256` | SHA-256 |
+| **Sorted-pair** hashing: it orders the two children, so proofs carry no side information | **Explicit side** per step; order is the tree's, not the values' |
+| No domain separation | `0x00` on leaves, `0x01` on nodes |
+
+Sorted-pair hashing is the subtle one. It is a legitimate design that makes
+proofs a byte shorter, and it is incompatible with any tree whose shape is
+positional, which this one's is.
+
+The prior art that **does** apply is RFC 6962 and Certificate Transparency
+verifiers, not the generic EVM Merkle libraries. On an EVM chain, SHA-256 is the
+precompile at address `0x2`.
 
 ## 6. Epoch boundaries
 
@@ -186,8 +209,12 @@ root[v1,v2,v3]   = b5f681547da3a628a8bae98c0dfbfb53ea6ec7a9cf1f35c5b823910b46624
 
 A single-entry root **is** its leaf hash, because there is nothing to pair it
 with and promotion carries it straight to the top. The three-entry case exercises
-promotion, which is where independent implementations most often disagree, so it
-is the one to check first.
+promotion, which is where independent implementations most often disagree.
+
+Suggested order for bringing up a new verifier, from the DIVA lane: the
+three-entry root first, because promotion is where implementations diverge; then
+the single entry, because `root == leaf` surprises people; then the empty case,
+32 zero bytes; then a spread of sizes against the leaf and root vectors.
 
 ## 10. Changing any of this
 

@@ -260,7 +260,9 @@ The two compose: transaction inclusion gives an immediate **provisional** answer
 the next root gives the **authoritative** one. That is the DIVA lane's framing and
 it is why the epoch can be unhurried without the bridge feeling slow.
 
-- **RFC 6962**, so their audited Solidity verifiers apply. Not asserted: mine
+- **RFC 6962**, so Certificate Transparency verifiers are the prior art. ⚠ **Not**
+  OpenZeppelin's `MerkleProof`, which uses keccak, sorted-pair hashing and no
+  domain tags, and would silently be the wrong verifier. Not asserted: mine
   builds bottom-up, the RFC is defined top-down, and a test checks the two agree
   for every leaf count from 1 to 64.
 - Domain-separated leaves and nodes; an unpaired node is **promoted, never
