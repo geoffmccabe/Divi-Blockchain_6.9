@@ -244,15 +244,41 @@ explorer uses, with correct supplies, locked flags and histories.
 **So the only thing still missing is the number.** With `GENESIS_HEIGHT` set, the
 wallet can show balances as well as send. Without it, it refuses honestly.
 
-## Phase 6 — the registry root on DIVA · NOT STARTED
+## Phase 6 — the registry root · FORMAT BUILT 2026-Sep-06
 
-- Each epoch, publish one Merkle **root** over the collectibles registry to DIVA.
-  Not the registry itself.
-- Prove individual collectibles on demand against the root.
-- **Never mirror availability.** It is the field that goes stale fastest, and a
-  stale "available" is someone trading on a lie.
-- Until the DIVA validator set exists this is one signer with the same trust as
-  the coordinator. Build the format now, swap the signer later.
+Commit `d03f6c172`. Frozen format in `docs/NFD-REGISTRY-ROOT.md`, agreed with the
+DIVA lane before anything was written.
+
+**It closes a real gap rather than duplicating their bridge.** Their proofs
+attest an *event*: a transaction is included under a block's Merkle root. That is
+not enough to know a bridge lock was valid, because a malformed record, or one
+sent by somebody who did not own the collectible, is still provably included.
+Only the overlay rules decide whether ownership moved. This attests the
+*interpreted result*, so DIVA does not have to run its own overlay indexer.
+
+The two compose: transaction inclusion gives an immediate **provisional** answer,
+the next root gives the **authoritative** one. That is the DIVA lane's framing and
+it is why the epoch can be unhurried without the bridge feeling slow.
+
+- **RFC 6962**, so their audited Solidity verifiers apply. Not asserted: mine
+  builds bottom-up, the RFC is defined top-down, and a test checks the two agree
+  for every leaf count from 1 to 64.
+- Domain-separated leaves and nodes; an unpaired node is **promoted, never
+  duplicated** (CVE-2012-2459).
+- What is signed is a **header**, not a bare root: tag, epoch, height, leaf count,
+  root. A bare root cannot be bound to a moment, and an old root presented as
+  current verifies perfectly against its own proofs.
+- Epoch by **block-height modulus**, never wall clock. Hourly, configurable. A
+  verifier binds to the published **height**, never an assumed schedule, which is
+  what makes configurability safe.
+- Collectibles only. Fungible tokens move by a different mechanism and would
+  churn the tree for no benefit.
+
+**Still theirs, and not started:** publishing a root, who signs it, the validator
+set. Until POAS exists a signed root has the same trust as a coordinator
+signature, so this is "the format is ready", never "it is decentralized".
+**Nothing publishes roots yet, so this is a format and a library, not a running
+system.**
 
 ## Phase 7 — finish the bridge · NOT STARTED
 
