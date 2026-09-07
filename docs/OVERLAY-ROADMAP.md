@@ -220,10 +220,29 @@ before starting and Rust-only by their preference: the tokens panel still says
   `sync-divi-crates.sh` extended to keep drift loud. `dvxp-scan` taken with
   `default-features = false`: no HTTP client, no listener.
 
-**Still to do:** the read side. The index-dependent checks (does this address
-hold enough, is that ticker taken, is the commit mature) and the balance queries
-need a scanned ledger, which needs `GENESIS_HEIGHT`. So the panel can be wired
-for **sending** before it can be wired for **showing**.
+**The read side is now built too**, DD69 `b079a6d`. `crates/supervisor/src/dmt_index.rs`
+runs the wallet's own index over the chain it already has, in-process, no HTTP.
+
+- It contains **no interpretation of any record**. The rules, ledger, reorg
+  window and scanning loop are the vendored crates, shared byte-identical with
+  the explorer. It supplies only block-fetching through the wallet's existing
+  pooled connection. Keeping that the only difference is why `follow` was
+  extracted in the chain repo (`a862c4dd2`): one scanning loop, two hosts.
+- **Staking comes first.** 25-block slices, a pause between them, a longer pause
+  once caught up, and the writer lock held for one slice only so a balance query
+  waits milliseconds. The node it would starve is the one the user stakes with.
+- `genesis_height()` **refuses on mainnet** rather than starting a scan it cannot
+  finish, and says so in words. Test chains start at 0.
+- `IndexStatus::trustworthy()` is what any UI must gate on: running, not halted,
+  within two blocks of the tip.
+
+**Verified on a live chain**, the one thing unit tests cannot cover: caught up to
+the tip and read back all three test tokens through the same query layer the
+explorer uses, with correct supplies, locked flags and histories.
+`examples/dmt_index_smoke.rs` is that check, rerunnable.
+
+**So the only thing still missing is the number.** With `GENESIS_HEIGHT` set, the
+wallet can show balances as well as send. Without it, it refuses honestly.
 
 ## Phase 6 — the registry root on DIVA · NOT STARTED
 
