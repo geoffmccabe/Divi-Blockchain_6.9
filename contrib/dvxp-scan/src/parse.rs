@@ -96,7 +96,7 @@ pub fn address_of_output(o: &Value) -> Option<Address> {
 }
 
 pub fn hex_to_bytes(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len() / 2)
@@ -126,7 +126,7 @@ pub fn hash_bytes(hex: &str) -> [u8; 32] {
 /// owner cannot spend from.
 pub fn addr_from_str(s: &str) -> Option<Address> {
     const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    let mut num = vec![0u8; 25];
+    let mut num = [0u8; 25];
     for ch in s.bytes() {
         let val = ALPHABET.iter().position(|&c| c == ch)? as u32;
         let mut carry = val;

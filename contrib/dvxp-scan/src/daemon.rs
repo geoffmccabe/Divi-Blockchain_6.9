@@ -136,21 +136,32 @@ pub fn run_daemon() -> ExitCode {
             // The writer lock is held only for the slice, so the read API keeps
             // answering between slices rather than blocking for a whole catch-up.
             let outcome = {
-                let mut o = shared.overlay.write().expect("scanner owns the only writer");
+                // A poisoned lock means a thread died part-way through a block,
+                // so the ledger is neither one block nor the next. The read API
+                // already answers 503 in that state; the scanner should stop for
+                // the same reason rather than panic and take the API down with
+                // it, since an index that stops is recoverable and one that
+                // serves torn state is not.
+                let Ok(mut o) = shared.overlay.write() else {
+                    eprintln!("HALT: the index failed part-way through a block");
+                    return ExitCode::from(EXIT_HALTED);
+                };
                 follower.catch_up(&mut o, &mut node, slice)
             };
             let progress = match outcome {
                 Ok(p) => p,
                 Err(FollowError::Source(e)) => {
                     eprintln!("lost the node: {e}");
-                    let o = shared.overlay.read().expect("scanner owns the only writer");
-                    let _ = snapshot.write(&o, tip);
+                    if let Ok(o) = shared.overlay.read() {
+                        let _ = snapshot.write(&o, tip);
+                    }
                     return ExitCode::from(EXIT_NO_NODE);
                 }
                 Err(e @ FollowError::Fatal(_)) => {
                     eprintln!("HALT: {e}");
-                    let o = shared.overlay.read().expect("scanner owns the only writer");
-                    let _ = snapshot.write(&o, tip);
+                    if let Ok(o) = shared.overlay.read() {
+                        let _ = snapshot.write(&o, tip);
+                    }
                     return ExitCode::from(EXIT_HALTED);
                 }
             };
@@ -163,8 +174,7 @@ pub fn run_daemon() -> ExitCode {
                 println!("  skip height {height} tx {tx_index}: {why:?}");
             }
 
-            if progress.applied > 0 {
-                let o = shared.overlay.read().expect("scanner owns the only writer");
+            if let (true, Ok(o)) = (progress.applied > 0, shared.overlay.read()) {
                 let _ = snapshot.write(&o, tip);
                 println!(
                     "  {}/{tip}  collectibles {}  tokens {}  events {}  rpc calls {}",
@@ -184,7 +194,10 @@ pub fn run_daemon() -> ExitCode {
         // sideways underneath us.
         sleep(poll);
         let reorg = {
-            let mut o = shared.overlay.write().expect("scanner owns the only writer");
+            let Ok(mut o) = shared.overlay.write() else {
+                eprintln!("HALT: the index failed part-way through a block");
+                return ExitCode::from(EXIT_HALTED);
+            };
             follower.check_for_reorg(&mut o, &mut node)
         };
         match reorg {

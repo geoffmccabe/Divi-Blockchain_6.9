@@ -350,7 +350,7 @@ mod tests {
         }
         b
     }
-    fn rec(subtype: u8, body: &[u8]) -> Record {
+    fn rec(subtype: u8, body: &[u8]) -> Record<'_> {
         Record { record_type: TYPE_NFD, subtype, body }
     }
 

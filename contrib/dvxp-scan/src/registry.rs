@@ -106,7 +106,7 @@ impl EpochSchedule {
 
     /// Whether this height closes an epoch, and so is a height to cut at.
     pub fn is_boundary(&self, height: u64) -> bool {
-        (height + 1) % self.blocks == 0
+        (height + 1).is_multiple_of(self.blocks)
     }
 }
 
@@ -232,6 +232,10 @@ impl EpochRoot {
 /// The caller is responsible for calling this at an epoch boundary; committing
 /// to a height nobody agrees on produces a root nobody can check.
 pub fn build(overlay: &Overlay, epoch: u64, height: u64) -> EpochRoot {
+    // Unbounded ON PURPOSE, and the only place that is true. Every read endpoint
+    // is limited because it serves a page to somebody; a root must cover the
+    // whole registry or it is a commitment to a subset, which is worse than no
+    // commitment because it looks like one.
     let mut entries: Vec<Entry> = query::recent_nfds(overlay, usize::MAX)
         .into_iter()
         .map(|n| Entry { id: n.id, owner: n.owner })

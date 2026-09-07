@@ -366,11 +366,13 @@ impl Overlay {
         let sender = dmt_indexer::ledger::state::addr_key(tctx.sender);
         // Collected first, then handed to the log in one go: the closure needs
         // the ledger for a mint's measured amount, and cannot hold the log at
-        // the same time.
+        // the same time. The closure lives in its own scope so the borrow
+        // visibly ends, rather than relying on a drop() that reads like a no-op.
         let mut out: Vec<TokenEvent> = Vec::new();
         // A token is keyed by (height, tx_index); the ledger never sees the
         // transaction hash, but every explorer link needs it.
         let mut genesis: Option<((u64, u32), [u8; 32])> = None;
+        {
         let mut push = |kind, token, from, to, amount| {
             out.push(TokenEvent {
                 token,
@@ -427,7 +429,8 @@ impl Overlay {
             R::NameCommit(_) | R::LockSupply(_) | R::IssuerTransfer(_) | R::TickerTransfer(_) => {}
         }
 
-        drop(push);
+        }
+
         if let Some((token, txid)) = genesis {
             self.log.record_token_genesis(token, txid);
         }
@@ -933,7 +936,7 @@ mod tests {
 
         // Now discard the issue too.
         o.rollback_to(1).unwrap();
-        assert!(query::all_tokens(&o).is_empty());
+        assert!(query::all_tokens(&o, 100).is_empty());
         assert_eq!(o.log.token_event_count(), 0);
         assert_eq!(
             query::token_meta(&o, token),
@@ -1035,7 +1038,7 @@ mod tests {
         .unwrap();
         let id = [0x11u8; 32];
 
-        assert_eq!(query::nfds_owned_by(&o, key(minter)).len(), 1);
+        assert_eq!(query::nfds_owned_by(&o, key(minter), 100).len(), 1);
         assert_eq!(query::nfd(&o, &id).unwrap().owner, key(minter));
 
         // Transfer it: 32-byte id, 21-byte new owner, 32-byte wrapkey pointer.
@@ -1053,8 +1056,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(query::nfd(&o, &id).unwrap().owner, key(buyer));
-        assert!(query::nfds_owned_by(&o, key(minter)).is_empty());
-        assert_eq!(query::nfds_owned_by(&o, key(buyer)).len(), 1);
+        assert!(query::nfds_owned_by(&o, key(minter), 100).is_empty());
+        assert_eq!(query::nfds_owned_by(&o, key(buyer), 100).len(), 1);
         assert_eq!(o.log.nfd_event_count(), 2, "the mint and the transfer");
     }
 }

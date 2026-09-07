@@ -143,7 +143,8 @@ fn route(path: &str, qs: &str, shared: &Shared) -> (u16, Value) {
         }
 
         ("tokens", "") => Ok(json!({
-            "tokens": query::all_tokens(&overlay).iter().map(token_json).collect::<Vec<_>>(),
+            "tokens": query::all_tokens(&overlay, limit_of(qs, 200))
+                .iter().map(token_json).collect::<Vec<_>>(),
         })),
 
         ("token", id) => match query::parse_token_id(id) {
@@ -252,7 +253,7 @@ fn route(path: &str, qs: &str, shared: &Shared) -> (u16, Value) {
             let list = match (param(qs, "owner"), param(qs, "q")) {
                 (Some(_), _) => match single_address(qs) {
                     Err(bad) => return finish(Err((400, bad)), meta),
-                    Ok(a) => query::nfds_owned_by(&overlay, a),
+                    Ok(a) => query::nfds_owned_by(&overlay, a, limit),
                 },
                 (None, Some(q)) => query::search_nfds(&overlay, &percent_decode(q), limit),
                 (None, None) => query::recent_nfds(&overlay, limit),
@@ -272,7 +273,7 @@ fn route(path: &str, qs: &str, shared: &Shared) -> (u16, Value) {
                         "minted": c.minted,
                         "metaPtr": hash_hex(&c.meta_ptr),
                     },
-                    "members": query::collection_members(&overlay, &h)
+                    "members": query::collection_members(&overlay, &h, limit_of(qs, 200))
                         .iter().map(nfd_json).collect::<Vec<_>>(),
                 })),
             },

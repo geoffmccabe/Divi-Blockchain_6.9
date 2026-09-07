@@ -199,9 +199,13 @@ pub fn tokens_meta(o: &Overlay, tokens: &[TokenKey]) -> Vec<TokenMeta> {
     tokens.iter().filter_map(|t| token_meta(o, *t)).collect()
 }
 
-/// Every token the index knows about, oldest first.
-pub fn all_tokens(o: &Overlay) -> Vec<TokenMeta> {
-    o.dmt.ledger.state.tokens.keys().filter_map(|t| token_meta(o, *t)).collect()
+/// Tokens the index knows about, oldest first, bounded.
+///
+/// Bounded because this is reachable from a public endpoint. Today there are a
+/// handful of tokens and any limit looks like ceremony; the point of a limit is
+/// that it is already there on the day there are not.
+pub fn all_tokens(o: &Overlay, limit: usize) -> Vec<TokenMeta> {
+    o.dmt.ledger.state.tokens.keys().take(limit).filter_map(|t| token_meta(o, *t)).collect()
 }
 
 /// Someone's token history, newest first, from their point of view.
@@ -551,17 +555,22 @@ pub fn hex_to_addr(s: &str) -> Option<AddrKey> {
         return None;
     }
     let mut out = [0u8; 20];
-    for i in 0..20 {
-        out[i] = u8::from_str_radix(hash.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hash.get(i * 2..i * 2 + 2)?, 16).ok()?;
     }
     Some((kind, out))
 }
 
-pub fn nfds_owned_by(o: &Overlay, addr: AddrKey) -> Vec<NfdView> {
+/// What one address holds, bounded.
+///
+/// An address can in principle hold any number of collectibles, and this is
+/// reachable from a public endpoint, so the caller's limit applies here as it
+/// does everywhere else rather than only where it seemed likely to matter.
+pub fn nfds_owned_by(o: &Overlay, addr: AddrKey, limit: usize) -> Vec<NfdView> {
     let mut packed = [0u8; 21];
     packed[0] = addr.0;
     packed[1..].copy_from_slice(&addr.1);
-    o.nfd.owned_by(&packed).iter().filter_map(|id| nfd(o, id)).collect()
+    o.nfd.owned_by(&packed).iter().take(limit).filter_map(|id| nfd(o, id)).collect()
 }
 
 pub fn collection(o: &Overlay, id: &[u8; 32]) -> Option<CollectionView> {
@@ -585,7 +594,11 @@ pub fn collection(o: &Overlay, id: &[u8; 32]) -> Option<CollectionView> {
 ///
 /// Walks the event log rather than the ledger, because a collection's members
 /// are only discoverable from the mints that named it.
-pub fn collection_members(o: &Overlay, id: &[u8; 32]) -> Vec<NfdView> {
+/// Collectibles minted into one collection, bounded.
+///
+/// A capped collection can be large by design, so this is exactly the endpoint
+/// where an unbounded response would first hurt.
+pub fn collection_members(o: &Overlay, id: &[u8; 32], limit: usize) -> Vec<NfdView> {
     let mut out: Vec<NfdView> = o
         .log
         .nfd_events()
@@ -594,6 +607,7 @@ pub fn collection_members(o: &Overlay, id: &[u8; 32]) -> Vec<NfdView> {
         .collect();
     out.sort_by_key(|n| n.id);
     out.dedup_by_key(|n| n.id);
+    out.truncate(limit);
     out
 }
 
@@ -614,7 +628,7 @@ mod tests {
     fn an_empty_index_answers_without_inventing_anything() {
         let o = Overlay::new();
         assert!(balances(&o, &[(0, [1; 20])]).is_empty());
-        assert!(all_tokens(&o).is_empty());
+        assert!(all_tokens(&o, 100).is_empty());
         assert_eq!(token_meta(&o, (1, 0)), None);
         assert_eq!(mint_terms(&o, (1, 0), 100), None);
         assert!(history(&o, &[(0, [1; 20])], 50).is_empty());
