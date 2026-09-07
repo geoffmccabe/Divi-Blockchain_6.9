@@ -201,9 +201,29 @@ Commit `71b430285`.
    PoE are both clear. The token module must call it rather than doing its own
    coin selection.
 
-**Still to do, and it needs the builds lane:** a token module in the DD69
-supervisor beside `names.rs` and `poe.rs`, then swapping the stub data layer and
-enabling Send and Create.
+**The wallet half is now done too**, DD69 commit `a1e897d` on branch
+`feat/dmt-tokens` off `integration/all-features`, agreed with the builds lane
+before starting and Rust-only by their preference: the tokens panel still says
+"preview only" and nothing user-visible changes until they wire it.
+
+- `crates/supervisor/src/dmt.rs` beside `names.rs` and `poe.rs`. Six operations:
+  create, send, airdrop, burn, lock supply, reserve a ticker. It contains **no
+  record layouts and no coin selection**: bytes come from `dmt_indexer::encode`,
+  and funding goes through `dvxp::broadcast_record` with `from` pinned, which is
+  the Names lane's shared implementation rather than a token-only copy.
+- `treasury_address()` returns an address or a refusal, never a placeholder,
+  matching `names.rs`. That is what stops the wallet paying a fee to an address
+  nobody controls while the compiled-in treasury is still zeroes.
+- Six Tauri commands, appended to the handler list rather than inserted so the
+  builds lane's edits stay a trivial merge. Amounts cross as strings.
+- `dmt-indexer`, `nfd-indexer` and `dvxp-scan` vendored into `crates/`, with
+  `sync-divi-crates.sh` extended to keep drift loud. `dvxp-scan` taken with
+  `default-features = false`: no HTTP client, no listener.
+
+**Still to do:** the read side. The index-dependent checks (does this address
+hold enough, is that ticker taken, is the commit mature) and the balance queries
+need a scanned ledger, which needs `GENESIS_HEIGHT`. So the panel can be wired
+for **sending** before it can be wired for **showing**.
 
 ## Phase 6 — the registry root on DIVA · NOT STARTED
 
