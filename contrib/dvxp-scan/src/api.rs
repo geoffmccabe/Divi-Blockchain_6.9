@@ -271,7 +271,7 @@ fn route(path: &str, qs: &str, shared: &Shared) -> (u16, Value) {
                         "creator": addr_json(c.creator),
                         "maxSupply": c.max_supply,
                         "minted": c.minted,
-                        "metaPtr": hash_hex(&c.meta_ptr),
+                        "metaPtr": payload_hex(&c.meta_ptr),
                     },
                     "members": query::collection_members(&overlay, &h, limit_of(qs, 200))
                         .iter().map(nfd_json).collect::<Vec<_>>(),
@@ -355,7 +355,7 @@ fn token_json(m: &query::TokenMeta) -> Value {
         // The chain carries a ticker, not a display name. Anything richer lives
         // behind this pointer; a client that has not resolved it should show
         // the ticker rather than invent a name.
-        "metadataPtr": m.metadata_ptr.map(|p| hash_hex(&p)),
+        "metadataPtr": m.metadata_ptr.map(|p| payload_hex(&p)),
     })
 }
 
@@ -375,9 +375,9 @@ fn nfd_json(n: &query::NfdView) -> Value {
     json!({
         "id": hash_hex(&n.id),
         "owner": addr_json(n.owner),
-        "arweavePtr": hash_hex(&n.arweave_ptr),
-        "contentHash": hash_hex(&n.content_hash),
-        "thumbPtr": n.thumb_ptr.map(|t| hash_hex(&t)),
+        "arweavePtr": payload_hex(&n.arweave_ptr),
+        "contentHash": payload_hex(&n.content_hash),
+        "thumbPtr": n.thumb_ptr.map(|t| payload_hex(&t)),
         "collectionId": n.collection_id.map(|c| hash_hex(&c)),
         "mintHeight": n.mint_height,
     })
@@ -393,11 +393,28 @@ fn addr_json(a: AddrKey) -> Value {
     Value::String(format!("{}:{}", a.0, hex(&a.1)))
 }
 
-/// Back to the byte order people read hashes in.
+/// A TRANSACTION or BLOCK identifier, in the byte order people read them in.
+///
+/// Only for those. The reversal is a display convention for Bitcoin-style
+/// hashes, not a property of 32 bytes, and applying it to anything else
+/// corrupts the value.
 fn hash_hex(raw: &[u8; 32]) -> String {
     let mut r = *raw;
     r.reverse();
     hex(&r)
+}
+
+/// An opaque 32-byte payload: a storage pointer or a content hash, exactly as
+/// the chain holds it.
+///
+/// NOT reversed, and the distinction is not cosmetic. These are handed to a
+/// storage system to fetch bytes with; a pointer written backwards points at
+/// nothing, and a content hash written backwards never matches. Every one of
+/// these fields was going out reversed until a collectible was minted with real
+/// pointers, which only surfaced then because the earlier test data was all
+/// repeated bytes and reads the same either way.
+fn payload_hex(raw: &[u8; 32]) -> String {
+    hex(raw)
 }
 
 fn hex(b: &[u8]) -> String {
@@ -546,6 +563,25 @@ mod tests {
             "a Bitcoin address is refused rather than reinterpreted"
         );
         assert!(addresses_of("addresses=DPqBoHatvxSTvxdCyEMWtRoRtEt2xjcHUb").is_ok());
+    }
+
+    /// The bug this guards. A storage pointer is not a transaction id, and
+    /// reversing one produces a pointer to nothing. Repeated-byte test data
+    /// reads the same in either order, which is exactly why this went unnoticed
+    /// until a collectible was minted with real values.
+    #[test]
+    fn payload_pointers_are_not_reversed_the_way_txids_are() {
+        let mut raw = [0u8; 32];
+        raw[0] = 0x01;
+        raw[31] = 0xff;
+
+        assert_eq!(&payload_hex(&raw)[..2], "01", "a pointer starts where the bytes start");
+        assert_eq!(&hash_hex(&raw)[..2], "ff", "a txid is shown reversed, by convention");
+        assert_ne!(payload_hex(&raw), hash_hex(&raw), "the two must not be interchangeable");
+
+        // Repeated bytes hide the difference, which is the trap.
+        let flat = [0xab; 32];
+        assert_eq!(payload_hex(&flat), hash_hex(&flat));
     }
 
     #[test]
