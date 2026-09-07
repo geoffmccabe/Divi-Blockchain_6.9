@@ -34,6 +34,7 @@
 
 pub mod driver;
 pub mod events;
+pub mod parse;
 pub mod query;
 
 #[cfg(feature = "rpc")]

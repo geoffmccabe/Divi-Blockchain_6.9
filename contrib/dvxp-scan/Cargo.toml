@@ -14,11 +14,13 @@ nfd-indexer = { path = "../nfd-indexer" }
 # the wallet drives the scanner in-process from its own node connection and
 # wants none of this, so it depends on the crate with default-features = false.
 ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
-serde_json = { version = "1", optional = true }
+# NOT optional: `parse` reads a node's JSON and is needed by hosts that bring
+# their own connection, which is the whole point of the library half.
+serde_json = "1"
 
 [features]
 default = ["rpc"]
-rpc = ["dep:ureq", "dep:serde_json"]
+rpc = ["dep:ureq"]
 
 [lib]
 name = "dvxp_scan"

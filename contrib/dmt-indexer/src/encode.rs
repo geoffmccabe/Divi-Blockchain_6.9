@@ -52,8 +52,8 @@ use dvxp_core::varint::write_varint;
 use dvxp_core::{MAGIC, SUPPORTED_VERSION, TYPE_DMT};
 
 use crate::record::issue::{
-    Issue, MintTerms, FLAG_METADATA, FLAG_OPEN_MINT, FLAG_RISING_PRICE, FLAG_SUPPLY_LOCKED,
-    FLAGS_RESERVED, MAX_DECIMALS, METADATA_PTR_LEN, SALT_LEN,
+    Issue, FLAG_METADATA, FLAG_OPEN_MINT, FLAG_RISING_PRICE, FLAG_SUPPLY_LOCKED, FLAGS_RESERVED,
+    MAX_DECIMALS,
 };
 use crate::record::simple::COMMITMENT_LEN;
 use crate::record::transfer::{Group, Payout, Transfer};
@@ -348,6 +348,7 @@ pub fn ticker_transfer(name: &[u8], new_owner: Address) -> Result<Vec<u8>, Encod
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::issue::{MintTerms, METADATA_PTR_LEN, SALT_LEN};
     use crate::{parse_payload, Outcome, Record};
 
     fn who(tag: u8) -> Address {
