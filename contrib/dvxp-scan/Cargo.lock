@@ -98,6 +98,7 @@ dependencies = [
  "dvxp-core",
  "nfd-indexer",
  "serde_json",
+ "sha2",
  "ureq",
 ]
 

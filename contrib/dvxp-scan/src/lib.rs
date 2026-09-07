@@ -37,6 +37,7 @@ pub mod events;
 pub mod follow;
 pub mod parse;
 pub mod query;
+pub mod registry;
 
 #[cfg(feature = "rpc")]
 pub mod rpc;

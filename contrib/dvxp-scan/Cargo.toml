@@ -7,6 +7,9 @@ license = "MIT"
 
 [dependencies]
 dvxp-core = { path = "../dvxp-core" }
+# Registry commitments. Same hash the rest of the overlay uses, and already in
+# the tree through dvxp-core, so this adds no new supply-chain surface.
+sha2 = "0.10"
 dmt-indexer = { path = "../dmt-indexer" }
 nfd-indexer = { path = "../nfd-indexer" }
 
