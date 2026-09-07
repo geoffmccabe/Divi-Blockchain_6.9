@@ -34,6 +34,7 @@
 
 pub mod driver;
 pub mod events;
+pub mod follow;
 pub mod parse;
 pub mod query;
 
@@ -53,6 +54,7 @@ pub mod daemon;
 pub use daemon::run_daemon;
 
 pub use driver::{BlockInput, BlockSummary, Overlay, ScanError, TxPayload};
+pub use follow::{BlockSource, FollowError, Follower, Progress};
 
 /// Blocks Divi produces per day at its 60-second target. Useful for reporting
 /// how far behind an index is in time rather than in blocks, which is what a

@@ -250,6 +250,23 @@ fn base64(input: &[u8]) -> String {
     out
 }
 
+/// The daemon's node is just one way of fetching a block, so it implements the
+/// same trait the wallet does. That is what keeps the two hosts on one scanning
+/// loop rather than two that drift.
+impl crate::follow::BlockSource for Node {
+    fn tip(&mut self) -> Result<u64, String> {
+        self.block_count().map_err(|e| e.to_string())
+    }
+
+    fn block_hash(&mut self, height: u64) -> Result<String, String> {
+        Node::block_hash(self, height).map_err(|e| e.to_string())
+    }
+
+    fn block_at(&mut self, height: u64) -> Result<BlockInput, String> {
+        Node::block_at(self, height).map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

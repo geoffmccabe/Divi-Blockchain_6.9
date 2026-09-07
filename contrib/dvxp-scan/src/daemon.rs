@@ -33,7 +33,8 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use crate::api::{self, Shared};
-use crate::driver::{Overlay, ScanError};
+use crate::driver::Overlay;
+use crate::follow::{FollowError, Follower};
 use crate::rpc::{Node, Throttle};
 use crate::store::Snapshot;
 
@@ -84,7 +85,11 @@ pub fn run_daemon() -> ExitCode {
     let start = env_u64("START_HEIGHT", 0);
     let poll = Duration::from_secs(env_u64("POLL_SECONDS", 20));
     let gap = Duration::from_micros(env_u64("RPC_GAP_MICROS", 4_000));
-    let snapshot_every = env_u64("SNAPSHOT_EVERY", 5_000).max(1);
+    // Blocks applied before the scanner pauses, publishes progress and lets the
+    // node breathe. It used to control only how often a snapshot was written;
+    // now it is the slice size too, which is the more useful knob: it is the
+    // dial between catching up fast and leaving the node alone.
+    let slice = env_u64("SNAPSHOT_EVERY", 500).max(1);
     let snapshot = Snapshot::new(
         env::var("SNAPSHOT").unwrap_or_else(|_| "/var/lib/divi-scan/overlay.json".into()),
     );
@@ -122,145 +127,80 @@ pub fn run_daemon() -> ExitCode {
     }
     println!("catching up {start} -> {tip}, snapshot at {}", snapshot.path().display());
 
-    let mut next = start;
+    // The shared follower, not a loop of its own. The wallet drives the same
+    // one from its own node connection; two copies would drift.
+    let mut follower = Follower::new(start);
+
     loop {
-        while next <= tip {
-            // Fetched OUTSIDE the lock. A block costs several RPC round trips
-            // and readers should not wait on the network for them.
-            let block = match node.block_at(next) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("lost the node at height {next}: {e}");
+        loop {
+            // The writer lock is held only for the slice, so the read API keeps
+            // answering between slices rather than blocking for a whole catch-up.
+            let outcome = {
+                let mut o = shared.overlay.write().expect("scanner owns the only writer");
+                follower.catch_up(&mut o, &mut node, slice)
+            };
+            let progress = match outcome {
+                Ok(p) => p,
+                Err(FollowError::Source(e)) => {
+                    eprintln!("lost the node: {e}");
                     let o = shared.overlay.read().expect("scanner owns the only writer");
                     let _ = snapshot.write(&o, tip);
                     return ExitCode::from(EXIT_NO_NODE);
                 }
-            };
-
-            let outcome = {
-                let mut o = shared.overlay.write().expect("scanner owns the only writer");
-                o.apply_block(&block)
-            };
-
-            match outcome {
-                Ok(summary) => {
-                    // Skips are facts about the chain, not noise. The previous
-                    // scanner discarded them, so a rejected record left no
-                    // trace anywhere and could not be investigated afterwards.
-                    for (tx_index, reason) in &summary.skipped {
-                        println!("  skip height {next} tx {tx_index}: {reason:?}");
-                    }
-                }
-                Err(ScanError::Halted(h)) | Err(ScanError::AlreadyHalted(h)) => {
-                    eprintln!("HALT at height {next}: {h:?}");
-                    eprintln!("This build cannot read that record. Upgrade, then restart.");
+                Err(e @ FollowError::Fatal(_)) => {
+                    eprintln!("HALT: {e}");
                     let o = shared.overlay.read().expect("scanner owns the only writer");
                     let _ = snapshot.write(&o, tip);
                     return ExitCode::from(EXIT_HALTED);
                 }
-                Err(other) => {
-                    eprintln!("cannot continue at height {next}: {other:?}");
-                    let o = shared.overlay.read().expect("scanner owns the only writer");
-                    let _ = snapshot.write(&o, tip);
-                    return ExitCode::from(EXIT_HALTED);
-                }
+            };
+
+            tip = progress.tip;
+            shared.tip.store(tip, Ordering::Relaxed);
+            // Skips are facts about the chain, not noise. The first scanner
+            // discarded them, so a rejected record left no trace anywhere.
+            for (height, tx_index, why) in &progress.skipped {
+                println!("  skip height {height} tx {tx_index}: {why:?}");
             }
 
-            if next % snapshot_every == 0 || next == tip {
+            if progress.applied > 0 {
                 let o = shared.overlay.read().expect("scanner owns the only writer");
                 let _ = snapshot.write(&o, tip);
                 println!(
-                    "  {next}/{tip}  collectibles {}  tokens {}  events {}  rpc calls {}",
+                    "  {}/{tip}  collectibles {}  tokens {}  events {}  rpc calls {}",
+                    progress.height,
                     o.nfd.count(),
                     o.dmt.ledger.state.tokens.len(),
                     o.log.token_event_count() + o.log.nfd_event_count(),
                     node.call_count()
                 );
             }
-            next += 1;
+            if progress.caught_up {
+                break;
+            }
         }
 
         // Caught up. Wait for the chain to move, then check it did not move
         // sideways underneath us.
         sleep(poll);
-        tip = match node.block_count() {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("lost the node while idle: {e}");
-                return ExitCode::from(EXIT_NO_NODE);
-            }
+        let reorg = {
+            let mut o = shared.overlay.write().expect("scanner owns the only writer");
+            follower.check_for_reorg(&mut o, &mut node)
         };
-        shared.tip.store(tip, Ordering::Relaxed);
-
-        match check_for_reorg(&mut node, &shared) {
-            Ok(Some(rolled_back_to)) => {
-                println!("reorg: rolled back to {rolled_back_to}, re-applying from there");
-                next = rolled_back_to + 1;
+        match reorg {
+            Ok(Some(height)) => {
+                println!("reorg: rolled back to {height}, re-applying from there");
             }
             Ok(None) => {}
-            Err(Fatal::Reorg(e)) => {
-                // Deeper than the retained window. Serving state we cannot
-                // justify is the one thing worse than being unavailable.
-                eprintln!("reorg deeper than the undo window: {e:?}");
-                eprintln!("Resync from START_HEIGHT is required.");
-                return ExitCode::from(EXIT_HALTED);
-            }
-            Err(Fatal::NoNode(e)) => {
+            Err(FollowError::Source(e)) => {
                 eprintln!("lost the node while checking for a reorg: {e}");
                 return ExitCode::from(EXIT_NO_NODE);
             }
-        }
-    }
-}
-
-enum Fatal {
-    NoNode(String),
-    Reorg(ScanError),
-}
-
-/// Has the chain replaced blocks we already applied?
-///
-/// Compares the hash the node reports at our tip with the one we recorded.
-/// Matching means nothing moved. Differing means we walk back until the hashes
-/// agree again and unwind to there. Divi caps reorgs at 100 blocks and the undo
-/// window retains 200, so this search is bounded by design rather than by hope.
-///
-/// Returns the height rolled back to, or `None` if nothing changed.
-fn check_for_reorg(node: &mut Node, shared: &Shared) -> Result<Option<u64>, Fatal> {
-    let (our_tip, our_hash, oldest) = {
-        let o = shared.overlay.read().expect("scanner owns the only writer");
-        let Some(tip) = o.tip() else { return Ok(None) };
-        let Some(hash) = o.hash_at(tip) else { return Ok(None) };
-        (tip, hash, o.oldest_undo_height().unwrap_or(tip))
-    };
-
-    if hash_matches(node, our_tip, our_hash)? {
-        return Ok(None);
-    }
-
-    // Walk back through what we still retain, looking for the fork point. The
-    // node is asked outside the lock; only the rollback itself takes the writer.
-    let mut height = our_tip;
-    while height > oldest {
-        height -= 1;
-        let stored = {
-            let o = shared.overlay.read().expect("scanner owns the only writer");
-            match o.hash_at(height) {
-                Some(h) => h,
-                None => break,
+            Err(e @ FollowError::Fatal(_)) => {
+                eprintln!("{e}");
+                return ExitCode::from(EXIT_HALTED);
             }
-        };
-        if hash_matches(node, height, stored)? {
-            let mut o = shared.overlay.write().expect("scanner owns the only writer");
-            o.rollback_to(height).map_err(Fatal::Reorg)?;
-            return Ok(Some(height));
         }
     }
-
-    Err(Fatal::Reorg(ScanError::BeyondUndoWindow { requested: oldest, oldest }))
 }
 
-fn hash_matches(node: &mut Node, height: u64, expected: [u8; 32]) -> Result<bool, Fatal> {
-    let hex = node.block_hash(height).map_err(|e| Fatal::NoNode(e.to_string()))?;
-    Ok(crate::rpc::hash_bytes(&hex) == expected)
-}
