@@ -76,8 +76,23 @@ jobs:
         run: |
           brew install automake libtool pkg-config berkeley-db@4 boost libevent
 
+      # Cache the depends output (boost / berkeley-db / libevent / openssl built
+      # from source) — that compile is most of the run. Keyed on the depends
+      # recipes, so it only rebuilds when a package's version/flags change. First-
+      # party actions/cache given this project's supply-chain history.
+      - name: Cache depends (${{ matrix.host }})
+        if: matrix.name != 'macos'
+        uses: actions/cache@v4
+        with:
+          path: |
+            divi/depends/built
+            divi/depends/sources
+            divi/depends/${{ matrix.host }}
+          key: depends-${{ matrix.host }}-${{ hashFiles('divi/depends/packages/*.mk', 'divi/depends/hosts/*.mk', 'divi/depends/Makefile') }}
+
       # ---- Build the depends tree (Linux + Windows) ----
       # NO_QT: we build the daemon only (--without-gui). NO_UPNP: drop miniupnpc.
+      # No-op (fast) when the cache above already has the built libs.
       - name: Build depends (${{ matrix.host }})
         if: matrix.name != 'macos'
         working-directory: divi/depends
