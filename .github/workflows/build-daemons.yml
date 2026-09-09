@@ -1,0 +1,144 @@
+name: Build daemons (divid69, all platforms)
+
+# The repeatable node-build framework — phase 2 of the DD69 pipeline (the app is
+# build-apps.yml in the wallet repo). One trigger builds our refactored core as
+# a SELF-CONTAINED `divid69` for every platform, packaged exactly how the wallet
+# fetches it at first run: a tar.gz named `divid69-<platform>.tar.gz` containing
+# `divid69`(.exe) and `divi69-cli`(.exe) at the top level.
+#
+# Run it from the Actions tab ("Run workflow") or:  gh workflow run build-daemons.yml
+#
+# Windows and Linux are cross/native-built on Linux runners via the in-tree
+# `depends` system (divi/depends) — the same mechanism Bitcoin Core uses for its
+# release binaries, so boost / berkeley-db / libevent / openssl are all built and
+# STATICALLY linked by depends. That is what makes the result run on a stranger's
+# machine with nothing installed. macOS arm64 is built natively on a Mac runner.
+#
+# Each job prints the SHA-256 of its tarball: that is the value to pin in the
+# wallet's crates/supervisor/src/install.rs `artifact()`, and the tarball is what
+# gets published to ~/Divilovescan/public/downloads (scan.divi.love/downloads).
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["daemon-v*"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-22.04
+            host: x86_64-pc-linux-gnu
+            ext: ""
+            pkg: divid69-linux-x86_64.tar.gz
+          - name: windows
+            os: ubuntu-22.04
+            host: x86_64-w64-mingw32
+            ext: ".exe"
+            pkg: divid69-windows-x86_64.tar.gz
+          - name: macos
+            os: macos-14           # Apple Silicon runner
+            host: native
+            ext: ""
+            pkg: divid69-macos-arm64.tar.gz
+
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    env:
+      # gcc 13+ / clang 15+ dropped transitive <cstdint>/<cstddef>; this old
+      # Bitcoin-era source needs them forced in or it fails "uint32_t does not
+      # name a type". Harmless where already included.
+      SRC_CXXFLAGS: "-O2 -g0 -include cstdint -include cstddef"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Linux host toolchain (also builds the Windows target via mingw) ----
+      - name: Linux/Windows build deps
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libtool autotools-dev automake \
+            pkg-config bsdmainutils curl ca-certificates python3 bison
+          if [ "${{ matrix.name }}" = "windows" ]; then
+            sudo apt-get install -y g++-mingw-w64-x86-64 g++-mingw-w64-x86-64-posix
+            # depends + Bitcoin need the POSIX (not win32) threading variant.
+            sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+            sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+          fi
+
+      # ---- macOS host toolchain (native arm64 build) ----
+      - name: macOS build deps
+        if: matrix.name == 'macos'
+        run: |
+          brew install automake libtool pkg-config berkeley-db@4 boost libevent
+
+      # ---- Build the depends tree (Linux + Windows) ----
+      # NO_QT: we build the daemon only (--without-gui). NO_UPNP: drop miniupnpc.
+      - name: Build depends (${{ matrix.host }})
+        if: matrix.name != 'macos'
+        working-directory: divi/depends
+        run: make HOST=${{ matrix.host }} NO_QT=1 NO_UPNP=1 -j$(nproc)
+
+      # ---- Configure + make (Linux + Windows, using the depends prefix) ----
+      - name: Build divid (${{ matrix.name }})
+        if: matrix.name != 'macos'
+        working-directory: divi
+        run: |
+          ./autogen.sh
+          CONFIG_SITE=$PWD/depends/${{ matrix.host }}/share/config.site \
+            ./configure --prefix=/ --without-gui --disable-tests --disable-bench \
+              --with-incompatible-bdb CXXFLAGS="$SRC_CXXFLAGS"
+          make -j$(nproc)
+
+      # ---- Configure + make (macOS native, static Homebrew libs) ----
+      - name: Build divid (macOS native)
+        if: matrix.name == 'macos'
+        working-directory: divi
+        run: |
+          BOOST=$(brew --prefix boost)
+          BDB=$(brew --prefix berkeley-db@4)
+          EVENT=$(brew --prefix libevent)
+          # Symlink the static boost libs into one dir so --with-boost-libdir
+          # finds the whole set (unit_test_framework included).
+          mkdir -p "$PWD/boost-static"
+          ln -sf "$BOOST"/lib/libboost_*.a "$PWD/boost-static/" || true
+          ./autogen.sh
+          ./configure --without-gui --without-miniupnpc --with-incompatible-bdb \
+            --disable-tests --disable-bench \
+            --with-boost-libdir="$PWD/boost-static" \
+            CPPFLAGS="-I$BDB/include -I$EVENT/include -I$BOOST/include" \
+            LDFLAGS="-L$BDB/lib -L$EVENT/lib" \
+            EVENT_LIBS="$EVENT/lib/libevent.a" \
+            EVENT_PTHREADS_LIBS="$EVENT/lib/libevent_pthreads.a" \
+            CXXFLAGS="$SRC_CXXFLAGS"
+          make -j$(sysctl -n hw.ncpu)
+
+      # ---- Package exactly how the wallet expects to unpack it ----
+      - name: Package divid69
+        run: |
+          set -e
+          E="${{ matrix.ext }}"
+          OUT="$RUNNER_TEMP/pkg"
+          mkdir -p "$OUT"
+          cp "divi/src/divid$E"     "$OUT/divid69$E"
+          cp "divi/src/divi-cli$E"  "$OUT/divi69-cli$E"
+          # Strip symbols (smaller, and the wallet already treats these as opaque).
+          if [ "${{ matrix.name }}" = "windows" ]; then
+            x86_64-w64-mingw32-strip "$OUT/divid69$E" "$OUT/divi69-cli$E" || true
+          else
+            strip "$OUT/divid69$E" "$OUT/divi69-cli$E" || true
+          fi
+          tar -C "$OUT" -czf "${{ matrix.pkg }}" "divid69$E" "divi69-cli$E"
+          echo "=== ${{ matrix.pkg }} SHA-256 (pin this in install.rs artifact()) ==="
+          shasum -a 256 "${{ matrix.pkg }}" || sha256sum "${{ matrix.pkg }}"
+
+      - name: Upload daemon tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.pkg }}
+          path: ${{ matrix.pkg }}
+          if-no-files-found: error
