@@ -109,7 +109,14 @@ jobs:
           echo "using config files from: $AUTOMAKE_SHARE"
           cp -f "$AUTOMAKE_SHARE/config.guess" "$AUTOMAKE_SHARE/config.sub" dist/
           cd build_unix
+          # --with-mutex: 4.8 has no locking case for an arm64 Mac, so it
+          # concludes the platform has no mutexes at all and stops with
+          # "Unable to find a mutex implementation". Naming the POSIX threads
+          # implementation is the standard answer. It affects only how the
+          # library locks at runtime, never the on-disk format, so wallet files
+          # stay byte-compatible with every other platform's build.
           ../dist/configure --enable-cxx --disable-shared --disable-replication --with-pic \
+            --with-mutex=POSIX/pthreads \
             --prefix="$BDB_PREFIX"
           make -j$(sysctl -n hw.ncpu) libdb_cxx-4.8.a libdb-4.8.a
           make install_lib install_include
