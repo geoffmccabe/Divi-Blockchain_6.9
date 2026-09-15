@@ -74,7 +74,37 @@ jobs:
       - name: macOS build deps
         if: matrix.name == 'macos'
         run: |
-          brew install automake libtool pkg-config berkeley-db@4 boost libevent miniupnpc
+          brew install automake libtool pkg-config boost libevent miniupnpc
+
+      # Berkeley DB 4.8, built from source with the SAME pinned tarball and
+      # checksum the depends system uses for Linux and Windows.
+      #
+      # Homebrew removed berkeley-db@4, which is what broke this job. The
+      # tempting fix is to point at berkeley-db@5, and it must NOT be taken: 4.8
+      # is the wallet format. A wallet.dat written by 5.x cannot be read back by
+      # every other build of this daemon, so Mac users would end up with wallet
+      # files the rest of the network's software could not open. Building 4.8
+      # ourselves keeps every platform on one format.
+      - name: Build Berkeley DB 4.8 (macOS)
+        if: matrix.name == 'macos'
+        run: |
+          set -eu
+          BDB_PREFIX="$PWD/bdb48"
+          mkdir -p "$BDB_PREFIX" && cd "$BDB_PREFIX"
+          curl -fsSLO https://download.oracle.com/berkeley-db/db-4.8.30.NC.tar.gz
+          echo "12edc0df75bf9abd7f82f821795bcee50f42cb2e5f76a6a281b85732798364ef  db-4.8.30.NC.tar.gz" \
+            | shasum -a 256 -c -
+          tar xzf db-4.8.30.NC.tar.gz
+          cd db-4.8.30.NC
+          # 4.8 predates these names being taken by the C11 atomics header.
+          sed -i.old 's/__atomic_compare_exchange/__atomic_compare_exchange_db/' dbinc/atomic.h
+          sed -i.old 's/atomic_init/atomic_init_db/' dbinc/atomic.h mp/mp_region.c mp/mp_mvcc.c mp/mp_fget.c mutex/mut_method.c mutex/mut_tas.c
+          cd build_unix
+          ../dist/configure --enable-cxx --disable-shared --disable-replication --with-pic \
+            --prefix="$BDB_PREFIX"
+          make -j$(sysctl -n hw.ncpu) libdb_cxx-4.8.a libdb-4.8.a
+          make install_lib install_include
+          echo "BDB_PREFIX=$BDB_PREFIX" >> "$GITHUB_ENV"
 
       # Cache the depends output (boost / berkeley-db / libevent / openssl built
       # from source) — that compile is most of the run. Keyed on the depends
@@ -122,7 +152,7 @@ jobs:
         working-directory: divi
         run: |
           BOOST=$(brew --prefix boost)
-          BDB=$(brew --prefix berkeley-db@4)
+          BDB="$BDB_PREFIX"   # built from source above; Homebrew no longer ships 4.8
           EVENT=$(brew --prefix libevent)
           # Symlink the static boost libs into one dir so --with-boost-libdir
           # finds the whole set (unit_test_framework included).
