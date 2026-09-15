@@ -168,6 +168,7 @@ jobs:
         working-directory: divi
         run: |
           BOOST=$(brew --prefix boost)
+          UPNP=$(brew --prefix miniupnpc)
           BDB="$BDB_PREFIX"   # built from source above; Homebrew no longer ships 4.8
           EVENT=$(brew --prefix libevent)
           # Symlink the static boost libs into one dir so --with-boost-libdir
@@ -179,8 +180,8 @@ jobs:
             --with-incompatible-bdb \
             --disable-tests --disable-bench \
             --with-boost-libdir="$PWD/boost-static" \
-            CPPFLAGS="-I$BDB/include -I$EVENT/include -I$BOOST/include" \
-            LDFLAGS="-L$BDB/lib -L$EVENT/lib" \
+            CPPFLAGS="-I$BDB/include -I$EVENT/include -I$BOOST/include -I$UPNP/include" \
+            LDFLAGS="-L$BDB/lib -L$EVENT/lib -L$UPNP/lib" \
             EVENT_LIBS="$EVENT/lib/libevent.a" \
             EVENT_PTHREADS_LIBS="$EVENT/lib/libevent_pthreads.a" \
             CXXFLAGS="$SRC_CXXFLAGS"
