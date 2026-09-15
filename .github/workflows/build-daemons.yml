@@ -74,7 +74,7 @@ jobs:
       - name: macOS build deps
         if: matrix.name == 'macos'
         run: |
-          brew install automake libtool pkg-config boost libevent miniupnpc
+          brew install automake libtool pkg-config boost libevent
 
       # Berkeley DB 4.8, built from source with the SAME pinned tarball and
       # checksum the depends system uses for Linux and Windows.
@@ -122,6 +122,30 @@ jobs:
           make install_lib install_include
           echo "BDB_PREFIX=$BDB_PREFIX" >> "$GITHUB_ENV"
 
+      # miniupnpc, the SAME version the depends system pins for Linux and
+      # Windows, with the same checksum.
+      #
+      # Homebrew ships 2.3.x, whose UPNP_GetValidIGD takes two more arguments
+      # than this code passes, so the build fails outright. Rather than change
+      # networking code to suit one platform's package manager, every platform
+      # gets the same library. Consistency here is not tidiness: the UPnP path
+      # decides whether a node is reachable, and it should behave identically
+      # everywhere.
+      - name: Build miniupnpc (macOS)
+        if: matrix.name == 'macos'
+        run: |
+          set -eu
+          UPNP_PREFIX="$PWD/upnp"
+          mkdir -p "$UPNP_PREFIX" && cd "$UPNP_PREFIX"
+          curl -fsSLO http://miniupnp.free.fr/files/miniupnpc-2.0.20170509.tar.gz
+          echo "d3c368627f5cdfb66d3ebd64ca39ba54d6ff14a61966dbecb8dd296b7039f16a  miniupnpc-2.0.20170509.tar.gz" \
+            | shasum -a 256 -c -
+          tar xzf miniupnpc-2.0.20170509.tar.gz
+          cd miniupnpc-2.0.20170509
+          make -j$(sysctl -n hw.ncpu) INSTALLPREFIX="$UPNP_PREFIX"
+          make install INSTALLPREFIX="$UPNP_PREFIX"
+          echo "UPNP_PREFIX=$UPNP_PREFIX" >> "$GITHUB_ENV"
+
       # Cache the depends output (boost / berkeley-db / libevent / openssl built
       # from source) — that compile is most of the run. Keyed on the depends
       # recipes, so it only rebuilds when a package's version/flags change. First-
@@ -168,7 +192,7 @@ jobs:
         working-directory: divi
         run: |
           BOOST=$(brew --prefix boost)
-          UPNP=$(brew --prefix miniupnpc)
+          UPNP="$UPNP_PREFIX"   # built from source above; Homebrew ships a newer, incompatible API
           BDB="$BDB_PREFIX"   # built from source above; Homebrew no longer ships 4.8
           EVENT=$(brew --prefix libevent)
           # Symlink the static boost libs into one dir so --with-boost-libdir
