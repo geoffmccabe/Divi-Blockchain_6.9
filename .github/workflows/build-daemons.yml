@@ -74,7 +74,7 @@ jobs:
       - name: macOS build deps
         if: matrix.name == 'macos'
         run: |
-          brew install automake libtool pkg-config berkeley-db@4 boost libevent
+          brew install automake libtool pkg-config berkeley-db@4 boost libevent miniupnpc
 
       # Cache the depends output (boost / berkeley-db / libevent / openssl built
       # from source) — that compile is most of the run. Keyed on the depends
@@ -91,12 +91,18 @@ jobs:
           key: depends-${{ matrix.host }}-${{ hashFiles('divi/depends/packages/*.mk', 'divi/depends/hosts/*.mk', 'divi/depends/Makefile') }}
 
       # ---- Build the depends tree (Linux + Windows) ----
-      # NO_QT: we build the daemon only (--without-gui). NO_UPNP: drop miniupnpc.
+      # NO_QT: we build the daemon only (--without-gui).
+      #
+      # miniupnpc IS built (NO_UPNP is deliberately NOT set). Without it the
+      # daemon has no way to ask the router to open its port, so a node on a
+      # home connection can only dial out and nothing can ever dial in. Such a
+      # node stakes perfectly well but is invisible to the rest of the network,
+      # which is exactly what happened to the Nigeria and UK nodes.
       # No-op (fast) when the cache above already has the built libs.
       - name: Build depends (${{ matrix.host }})
         if: matrix.name != 'macos'
         working-directory: divi/depends
-        run: make HOST=${{ matrix.host }} NO_QT=1 NO_UPNP=1 -j$(nproc)
+        run: make HOST=${{ matrix.host }} NO_QT=1 -j$(nproc)
 
       # ---- Configure + make (Linux + Windows, using the depends prefix) ----
       - name: Build divid (${{ matrix.name }})
@@ -106,6 +112,7 @@ jobs:
           ./autogen.sh
           CONFIG_SITE=$PWD/depends/${{ matrix.host }}/share/config.site \
             ./configure --prefix=/ --without-gui --disable-tests --disable-bench \
+              --with-miniupnpc --enable-upnp-default \
               --with-incompatible-bdb CXXFLAGS="$SRC_CXXFLAGS"
           make -j$(nproc)
 
@@ -122,7 +129,8 @@ jobs:
           mkdir -p "$PWD/boost-static"
           ln -sf "$BOOST"/lib/libboost_*.a "$PWD/boost-static/" || true
           ./autogen.sh
-          ./configure --without-gui --without-miniupnpc --with-incompatible-bdb \
+          ./configure --without-gui --with-miniupnpc --enable-upnp-default \
+            --with-incompatible-bdb \
             --disable-tests --disable-bench \
             --with-boost-libdir="$PWD/boost-static" \
             CPPFLAGS="-I$BDB/include -I$EVENT/include -I$BOOST/include" \
