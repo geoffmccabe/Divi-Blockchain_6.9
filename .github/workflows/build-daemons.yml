@@ -144,6 +144,11 @@ jobs:
           cd miniupnpc-2.0.20170509
           make -j$(sysctl -n hw.ncpu) INSTALLPREFIX="$UPNP_PREFIX"
           make install INSTALLPREFIX="$UPNP_PREFIX"
+          # Delete the shared library so the daemon MUST link the static one.
+          # Left in place, the linker prefers the .dylib and bakes in an
+          # absolute path inside the build machine's home directory — a binary
+          # that runs perfectly in CI and cannot start on any user's Mac.
+          rm -f "$UPNP_PREFIX"/lib/*.dylib
           echo "UPNP_PREFIX=$UPNP_PREFIX" >> "$GITHUB_ENV"
 
       # Cache the depends output (boost / berkeley-db / libevent / openssl built
@@ -210,6 +215,23 @@ jobs:
             EVENT_PTHREADS_LIBS="$EVENT/lib/libevent_pthreads.a" \
             CXXFLAGS="$SRC_CXXFLAGS"
           make -j$(sysctl -n hw.ncpu)
+
+      # A Mac binary that depends on a library path inside the build
+      # machine's home directory runs in CI and fails for every user. Check
+      # before packaging rather than after shipping.
+      - name: Refuse a macOS binary that depends on build-machine paths
+        if: matrix.name == 'macos'
+        working-directory: divi
+        run: |
+          set -eu
+          BAD=$(otool -L src/divid | tail -n +2 | grep -E "/Users/|/opt/homebrew|/usr/local/(opt|Cellar)" || true)
+          if [ -n "$BAD" ]; then
+            echo "This binary would not start on a user's Mac. It depends on:"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "Links only system libraries:"
+          otool -L src/divid | tail -n +2
 
       # ---- Package exactly how the wallet expects to unpack it ----
       - name: Package divid69
