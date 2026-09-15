@@ -99,6 +99,15 @@ jobs:
           # 4.8 predates these names being taken by the C11 atomics header.
           sed -i.old 's/__atomic_compare_exchange/__atomic_compare_exchange_db/' dbinc/atomic.h
           sed -i.old 's/atomic_init/atomic_init_db/' dbinc/atomic.h mp/mp_region.c mp/mp_mvcc.c mp/mp_fget.c mutex/mut_method.c mutex/mut_tas.c
+          # These sources are from 2010 and their config.guess/config.sub have
+          # never heard of an arm64 Mac, so configure cannot work out what
+          # machine it is on and gives up. Use the current ones that ship with
+          # automake. (The depends system does the same thing for the same
+          # reason, with its own bundled pair — but those predate Apple Silicon
+          # too, so on this runner they would not help.)
+          AUTOMAKE_SHARE=$(dirname "$(find "$(brew --prefix automake)/share" -name config.sub | head -1)")
+          echo "using config files from: $AUTOMAKE_SHARE"
+          cp -f "$AUTOMAKE_SHARE/config.guess" "$AUTOMAKE_SHARE/config.sub" dist/
           cd build_unix
           ../dist/configure --enable-cxx --disable-shared --disable-replication --with-pic \
             --prefix="$BDB_PREFIX"
