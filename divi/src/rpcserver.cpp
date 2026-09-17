@@ -1042,6 +1042,32 @@ void ServiceConnection(AcceptedConnection* conn)
 
 json_spirit::Value CRPCTable::execute(const std::string& strMethod, const json_spirit::Array& params) const
 {
+    /* Refuse calls until start-up has finished.
+     *
+     * The RPC server is deliberately started BEFORE the blockchain modules
+     * exist (see WarmUpRPCAndStartRPCThreads, which runs well before
+     * InitializeMainBlockchainModules), so that a client connecting early gets
+     * a civil answer instead of a refused connection. rpcserver.h has always
+     * documented that calls "error out immediately with RPC_IN_WARMUP" during
+     * that window, and RPCIsInWarmup existed to say so — but nothing ever
+     * consulted it on the JSON-RPC path. Only the REST handler did.
+     *
+     * So any client that called during those milliseconds reached a handler
+     * that asked for the ChainstateManager before it had been constructed, and
+     * the node aborted on assert(instance != nullptr) in ChainstateManager::Get.
+     *
+     * That is not hypothetical. The Divi Desktop wallet starts the node and
+     * immediately polls it to find out when it is ready, which lands squarely
+     * in this window. On machines where start-up is slower — Windows, where
+     * antivirus scans every file the node opens — the poll won the race every
+     * time, and the node crash-looped until the wallet gave up. Two testers
+     * were completely unable to start a node. On faster machines start-up
+     * simply won the race, which is why it looked platform-specific.
+     */
+    std::string warmupStatus;
+    if (RPCIsInWarmup(&warmupStatus))
+        throw JSONRPCError(RPC_IN_WARMUP, warmupStatus);
+
     // Find method
     const CRPCCommand* pcmd = CRPCTable::getRPCTable()[strMethod];
     if (!pcmd)
