@@ -25,12 +25,12 @@
 /// programming error at the call site: validate the charset first.
 pub fn registration_divi(len: usize) -> Option<u64> {
     Some(match len {
-        3 => 50_000,
-        4 => 20_000,
-        5 => 10_000,
-        6..=8 => 5_000,
-        9..=16 => 2_000,
-        17..=32 => 1_000,
+        3 => 10_000,
+        4 => 5_000,
+        5 => 2_000,
+        6..=8 => 1_000,
+        9..=16 => 500,
+        17..=32 => 250,
         _ => return None,
     })
 }
@@ -84,12 +84,12 @@ mod tests {
 
     #[test]
     fn short_names_cost_far_more() {
-        assert_eq!(registration_divi(3), Some(50_000));
-        assert_eq!(registration_divi(4), Some(20_000));
-        assert_eq!(registration_divi(5), Some(10_000));
-        assert_eq!(registration_divi(8), Some(5_000));
-        assert_eq!(registration_divi(9), Some(2_000));
-        assert_eq!(registration_divi(32), Some(1_000));
+        assert_eq!(registration_divi(3), Some(10_000));
+        assert_eq!(registration_divi(4), Some(5_000));
+        assert_eq!(registration_divi(5), Some(2_000));
+        assert_eq!(registration_divi(8), Some(1_000));
+        assert_eq!(registration_divi(9), Some(500));
+        assert_eq!(registration_divi(32), Some(250));
     }
 
     #[test]
