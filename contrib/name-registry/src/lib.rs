@@ -96,8 +96,8 @@ mod tests {
     fn quotes_a_typed_name_in_its_canonical_form() {
         let q = quote(" geoff ").unwrap();
         assert_eq!(q.canonical, "GEOFF");
-        assert_eq!(q.registration_divi, 10_000); // 5 characters
-        assert_eq!(q.renewal_divi, 10_000);
+        assert_eq!(q.registration_divi, 2_000); // 5 characters
+        assert_eq!(q.renewal_divi, 2_000);
         assert!(q.can_be_ticker);
     }
 
@@ -105,7 +105,7 @@ mod tests {
     fn long_names_are_cheap_and_cannot_be_tickers() {
         let q = quote("geoffreymccabe").unwrap();
         assert_eq!(q.canonical, "GEOFFREYMCCABE");
-        assert_eq!(q.registration_divi, 2_000);
+        assert_eq!(q.registration_divi, 500);
         assert!(!q.can_be_ticker);
     }
 
