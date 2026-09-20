@@ -86,7 +86,16 @@ std::string FormatSubVersion(const std::vector<std::string>& comments)
 {
     std::ostringstream ss;
     // ss << "/";
-    ss << CLIENT_NAME_STR << ": " << CLIENT_VERSION_STR;
+    // The suffix identifies which software this is, and it belongs HERE as well
+    // as in the local build string. Without it every node on the network calls
+    // itself "DIVI Core: 3.0.0.0" and there is no way to tell one
+    // implementation from another — so a map cannot show which nodes run this
+    // wallet, and anyone else shipping node software has nothing to identify
+    // themselves with either.
+    //
+    // subver is free text by convention (BIP 14), so older nodes read it
+    // happily and nothing about compatibility changes.
+    ss << CLIENT_NAME_STR << ": " << CLIENT_VERSION_STR << CLIENT_VERSION_SUFFIX;
     if (!comments.empty()) {
         std::vector<std::string>::const_iterator it(comments.begin());
         ss << "(" << *it;
