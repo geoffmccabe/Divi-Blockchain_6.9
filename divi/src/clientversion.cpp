@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "clientversion.h"
+#include <Settings.h>
 
 #include "tinyformat.h"
 
@@ -14,7 +15,7 @@
 // Identifies the modernized (OpenSSL-free, native-arm64) fork in `subversion` and
 // `--version`, WITHOUT changing the numeric/consensus version (still 3.0.0.0). The
 // Divi Desktop 6.9 wallet pins this suffix to confirm it is running the fast build.
-#define CLIENT_VERSION_SUFFIX "-dd69.1"
+#define CLIENT_VERSION_SUFFIX "-dd69.2"
 
 
 /**
@@ -82,8 +83,47 @@ std::string FormatFullVersion()
 /** 
  * Format the subversion field according to BIP 14 spec (https://github.com/bitcoin/bips/blob/master/bip-0014.mediawiki) 
  */
-std::string FormatSubVersion(const std::vector<std::string>& comments)
+/**
+ * The user-agent comment the node owner configured with -uacomment, made safe
+ * for BIP 14.
+ *
+ * WHY. A wallet lets its owner name their node ("Geoff's node", "Nigeria").
+ * Until now that name lived only on the owner's own disk; nobody else could
+ * see it. BIP 14 has a standard place for exactly this, the parenthesised
+ * comment after the version, and every Bitcoin-derived node exposes it as
+ * -uacomment. Using the same option name and the same format means any other
+ * wallet that follows the convention shows and reads names the same way.
+ *
+ * SAFETY. The comment is free text from a config file. Bytes that have
+ * meaning inside the subver string (the parentheses that delimit comments,
+ * the slash and colon that older parsers split on) are dropped, everything
+ * outside printable ASCII is dropped, and the result is capped so the whole
+ * subver stays well under the 256-byte wire limit that main.cpp enforces on
+ * receipt. A name that would break the announcement is not worth announcing.
+ */
+extern Settings& settings;
+static std::string UserAgentComment()
 {
+    std::string raw = settings.GetArg("-uacomment", "");
+    std::string out;
+    for (size_t i = 0; i < raw.size() && out.size() < 48; ++i) {
+        const unsigned char c = raw[i];
+        if (c < 0x20 || c > 0x7e) continue;        // printable ASCII only
+        if (c == '(' || c == ')' || c == '/' || c == ':') continue;
+        out.push_back(c);
+    }
+    // Trim surrounding spaces so "  name " announces as "name".
+    const size_t a = out.find_first_not_of(' ');
+    if (a == std::string::npos) return "";
+    const size_t b = out.find_last_not_of(' ');
+    return out.substr(a, b - a + 1);
+}
+
+std::string FormatSubVersion(const std::vector<std::string>& commentsIn)
+{
+    std::vector<std::string> comments(commentsIn);
+    const std::string ua = UserAgentComment();
+    if (!ua.empty()) comments.push_back(ua);
     std::ostringstream ss;
     // ss << "/";
     // The suffix identifies which software this is, and it belongs HERE as well
