@@ -37,15 +37,46 @@ enum Network {
     NET_IPV4,
     NET_IPV6,
     NET_TOR,
+    /** A node reachable only through a helper node (docs/PEER-RELAY-SPEC.md):
+     *  identified by its node key, addressed via the helper's IP and port. */
+    NET_RELAY,
 
     NET_MAX,
 };
 
+/** Stream version flag: serialize addresses in the "addrv2" form (BIP 155
+ *  shape), which can carry every kind of address. Without it the legacy
+ *  16-byte form is used and extended kinds are written as all zeros, which
+ *  old nodes already ignore. */
+static const int ADDRV2_FORMAT = 0x20000000;
+
+/** BIP 155 network ids on the wire, plus ours. */
+enum AddrV2NetId : unsigned char {
+    ADDRV2_IPV4 = 1,
+    ADDRV2_IPV6 = 2,
+    ADDRV2_TORV2 = 3,
+    ADDRV2_RELAY = 0x80,
+};
+
+/** Size of a node key (compressed secp256k1 public key). */
+static const size_t RELAY_KEY_SIZE = 33;
+
 /** IP address (IPv6, or IPv4 using mapped IPv6 range (::FFFF:0:0/96)) */
+class CService;
+
 class CNetAddr
 {
 protected:
     unsigned char ip[16]; // in network byte order
+    /** ---- EXTENDED KINDS ----
+     *  The 16-byte slot above is the address for IPv4, IPv6 and legacy Tor,
+     *  and every routine below keeps reading it. A relayed node does not
+     *  fit: it is a node key plus the helper it is reached through. Those
+     *  live here, and `m_ext` says which kind this is (NET_UNROUTABLE for a
+     *  plain IP address). For an extended kind `ip` holds a hash of the
+     *  extension so the old byte-based comparisons and hashes still work. */
+    Network m_ext;
+    std::vector<unsigned char> m_extBytes;
 
 public:
     CNetAddr();
@@ -61,7 +92,15 @@ public:
          */
     void SetRaw(Network network, const uint8_t* data);
 
-    bool SetSpecial(const std::string& strName); // for Tor addresses
+    bool SetSpecial(const std::string& strName); // for Tor and relayed addresses
+    /** Make this a relayed address: node `key` reachable through `helper`
+     *  (which must be a plain IPv4/IPv6 address with a port). */
+    bool SetRelay(const std::vector<unsigned char>& key, const CService& helper);
+    bool IsRelay() const;
+    /** The relayed node's key, empty if this is not a relayed address. */
+    std::vector<unsigned char> RelayKey() const;
+    /** The helper a relayed node is reached through (invalid if not relayed). */
+    CService RelayHelper() const;
     bool IsIPv4() const;                         // IPv4 mapped address (::FFFF:0:0/96, 0.0.0.0/0)
     bool IsIPv6() const;                         // IPv6 address (not mapped IPv4, not Tor)
     bool IsRFC1918() const;                      // IPv4 private networks (10.0.0.0/8, 192.168.0.0/16, 172.16.0.0/12)
@@ -103,11 +142,51 @@ public:
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion)
     {
-        READWRITE(FLATDATA(ip));
+        if (nVersion & ADDRV2_FORMAT) {
+            SerializeV2(s, ser_action, nType, nVersion);
+            return;
+        }
+        /* Legacy form. An extended kind cannot be expressed in it and is
+           written as the unspecified address, which every node discards. */
+        if (ser_action.ForRead()) {
+            m_ext = NET_UNROUTABLE;
+            m_extBytes.clear();
+            READWRITE(FLATDATA(ip));
+        } else if (m_ext != NET_UNROUTABLE) {
+            unsigned char zero[16] = {};
+            READWRITE(FLATDATA(zero));
+        } else {
+            READWRITE(FLATDATA(ip));
+        }
     }
+
+    template <typename Stream, typename Operation>
+    inline void SerializeV2(Stream& s, Operation ser_action, int nType, int nVersion)
+    {
+        /* BIP 155 shape: one byte of network id, a compact-size length, then
+           the bytes. Unknown ids are skipped by length, never fatal. */
+        if (ser_action.ForRead()) {
+            unsigned char id = 0;
+            std::vector<unsigned char> bytes;
+            READWRITE(id);
+            READWRITE(bytes);
+            SetFromV2(id, bytes);
+        } else {
+            unsigned char id;
+            std::vector<unsigned char> bytes;
+            ToV2(id, bytes);
+            READWRITE(id);
+            READWRITE(bytes);
+        }
+    }
+
+    void ToV2(unsigned char& id, std::vector<unsigned char>& bytes) const;
+    void SetFromV2(unsigned char id, const std::vector<unsigned char>& bytes);
 
     friend class CSubNet;
 };
+
+
 
 class CSubNet
 {
@@ -168,7 +247,9 @@ public:
     template <typename Stream, typename Operation>
     inline void SerializationOp(Stream& s, Operation ser_action, int nType, int nVersion)
     {
-        READWRITE(FLATDATA(ip));
+        /* Through the address's own serializer, so the addrv2 form and the
+           extended kinds work here too (it used to write the 16 bytes raw). */
+        READWRITE(*(CNetAddr*)this);
         unsigned short portN = htons(port);
         READWRITE(portN);
         if (ser_action.ForRead())

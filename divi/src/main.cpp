@@ -411,6 +411,11 @@ static bool SetPeerVersionAndServices(CCriticalSection& mainCriticalSection, CNo
     // Potentially mark this peer as a preferred download peer.
     pfrom->UpdatePreferredDownloadStatus();
 
+    /* We understand the addrv2 form (docs/PEER-RELAY-SPEC.md, A2). Said
+       before verack, as BIP 155 does; a node that does not know the message
+       ignores it and keeps sending the legacy form. */
+    pfrom->PushMessage("sendaddrv2");
+
     // Change version
     pfrom->PushMessage("verack");
 
@@ -514,10 +519,20 @@ bool static ProcessMessage(CCriticalSection& mainCriticalSection, CNode* pfrom, 
         return true;
     }
 
-    if (strCommand == "addr")
+    if (strCommand == "sendaddrv2")
+    {
+        pfrom->fWantsAddrV2 = true;
+        LogPrint("net", "peer=%d understands addrv2\n", pfrom->GetId());
+    }
+    else if (strCommand == "addr" || strCommand == "addrv2")
     {
         std::vector<CAddress> vAddr;
-        vRecv >> vAddr;
+        if (strCommand == "addrv2") {
+            CAddrV2List list(vAddr);
+            vRecv >> list;
+        } else {
+            vRecv >> vAddr;
+        }
 
         // Don't want addr from older versions unless seeding
         if (pfrom->GetVersion() < CADDR_TIME_VERSION && addrman.size() > 1000)
@@ -1058,24 +1073,38 @@ bool ProcessReceivedMessages(CNode* pfrom)
     return fOk;
 }
 
+static void PushAddrBatch(CNode* pto, std::vector<CAddress>& vAddr)
+{
+    if (pto->fWantsAddrV2) {
+        CAddrV2List list(vAddr);
+        pto->PushMessage("addrv2", list);
+    } else {
+        pto->PushMessage("addr", vAddr);
+    }
+}
+
 static void SendAddresses(CNode* pto)
 {
     std::vector<CAddress> vAddr;
     vAddr.reserve(pto->vAddrToSend.size());
     for(const CAddress& addr: pto->vAddrToSend) {
+        /* The legacy form cannot express a relayed address (it would go
+           out as all zeros); a peer that never said sendaddrv2 is simply
+           not told about those. */
+        if (!pto->fWantsAddrV2 && addr.IsRelay()) continue;
         // returns true if wasn't already contained in the set
         if (pto->setAddrKnown.insert(addr).second) {
             vAddr.push_back(addr);
             // receiver rejects addr messages larger than 1000
             if (vAddr.size() >= 1000) {
-                pto->PushMessage("addr", vAddr);
+                PushAddrBatch(pto, vAddr);
                 vAddr.clear();
             }
         }
     }
     pto->vAddrToSend.clear();
     if (!vAddr.empty())
-        pto->PushMessage("addr", vAddr);
+        PushAddrBatch(pto, vAddr);
 }
 
 static void CheckForBanAndDisconnectIfNotWhitelisted(CNode* pto)

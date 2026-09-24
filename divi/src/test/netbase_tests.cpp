@@ -5,6 +5,10 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include "netbase.h"
+#include "protocol.h"
+#include "streams.h"
+#include "version.h"
+#include "utilstrencodings.h"
 
 #include <string>
 
@@ -144,6 +148,110 @@ BOOST_AUTO_TEST_CASE(subnet_test)
     BOOST_CHECK(CSubNet("1:2:3:4:5:6:7:8/128").IsValid());
     BOOST_CHECK(!CSubNet("1:2:3:4:5:6:7:8/129").IsValid());
     BOOST_CHECK(!CSubNet("fuzzy").IsValid());
+}
+
+/* ---- Relayed addresses (docs/PEER-RELAY-SPEC.md, Part A) ---- */
+static std::vector<unsigned char> TestKey(unsigned char fill)
+{
+    std::vector<unsigned char> k(RELAY_KEY_SIZE, fill);
+    k[0] = 0x02; // looks like a compressed public key
+    return k;
+}
+
+BOOST_AUTO_TEST_CASE(relay_address_forms)
+{
+    CService helper("93.184.216.34", 51472);
+    CNetAddr r;
+    BOOST_CHECK(r.SetRelay(TestKey(0x11), helper));
+    BOOST_CHECK(r.IsRelay());
+    BOOST_CHECK(r.IsValid());
+    BOOST_CHECK(r.IsRoutable());
+    BOOST_CHECK(!r.IsIPv4() && !r.IsTor());
+    BOOST_CHECK_EQUAL(r.GetNetwork(), NET_RELAY);
+    BOOST_CHECK(r.RelayKey() == TestKey(0x11));
+    BOOST_CHECK(r.RelayHelper() == helper);
+    /* Printed and parsed back: the same address. */
+    std::string text = r.ToString();
+    BOOST_CHECK(text.compare(0, 6, "relay:") == 0);
+    BOOST_CHECK(text.find("@93.184.216.34:51472") != std::string::npos);
+    CNetAddr back;
+    BOOST_CHECK(back.SetSpecial(text));
+    BOOST_CHECK(back == r);
+    /* Bad inputs are refused. */
+    CNetAddr bad;
+    BOOST_CHECK(!bad.SetRelay(std::vector<unsigned char>(10, 1), helper));           // key wrong size
+    BOOST_CHECK(!bad.SetRelay(TestKey(0x11), CService("93.184.216.34", 0)));          // no port
+    BOOST_CHECK(!bad.SetRelay(TestKey(0x11), CService(r, 51472)));                   // helper cannot itself be relayed
+    BOOST_CHECK(!bad.SetSpecial("relay:zz@1.2.3.4:1"));
+    BOOST_CHECK(!bad.SetSpecial("relay:0202@nohost"));
+}
+
+BOOST_AUTO_TEST_CASE(relay_address_grouping)
+{
+    CService helper("93.184.216.34", 51472);
+    CNetAddr a, b, c;
+    a.SetRelay(TestKey(0x11), helper);
+    b.SetRelay(TestKey(0x22), helper);
+    c.SetRelay(TestKey(0x11), CService("151.101.1.69", 51472));
+    /* Two nodes behind one helper are different groups (the one-per-group
+       rule must not starve them); the same node via two helpers is one. */
+    BOOST_CHECK(a.GetGroup() != b.GetGroup());
+    BOOST_CHECK(a.GetGroup() == c.GetGroup());
+    BOOST_CHECK(a.GetGroup() != helper.GetGroup());
+    BOOST_CHECK(a != b);
+    BOOST_CHECK(a != c);
+    BOOST_CHECK((a < b) != (b < a));
+}
+
+BOOST_AUTO_TEST_CASE(relay_address_wire_forms)
+{
+    CService helper("2606:4700::1111", 51472);
+    CAddress relayed(CService(CNetAddr(), 0));
+    {
+        CNetAddr r;
+        BOOST_CHECK(r.SetRelay(TestKey(0x33), helper));
+        relayed = CAddress(CService(r, 51472));
+    }
+    CAddress plain(CService("151.101.1.69", 51472));
+
+    /* Legacy form: the plain address survives byte for byte; the relayed
+       one is written as the unspecified address, which is invalid. */
+    {
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        ss << plain << relayed;
+        CAddress p2, r2;
+        ss >> p2 >> r2;
+        BOOST_CHECK(p2 == plain);
+        BOOST_CHECK(!r2.IsValid());
+        BOOST_CHECK(!r2.IsRelay());
+    }
+    /* addrv2 form: both come back exactly. */
+    {
+        std::vector<CAddress> v{plain, relayed};
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        CAddrV2List out(v);
+        ss << out;
+        std::vector<CAddress> back;
+        CAddrV2List in(back);
+        ss >> in;
+        BOOST_REQUIRE_EQUAL(back.size(), 2u);
+        BOOST_CHECK(back[0] == plain);
+        BOOST_CHECK(back[1] == relayed);
+        BOOST_CHECK(back[1].IsRelay());
+        BOOST_CHECK(back[1].RelayHelper() == helper);
+    }
+    /* An unknown kind on the wire is skipped, not fatal. */
+    {
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | ADDRV2_FORMAT);
+        unsigned char unknown = 0x7f;
+        std::vector<unsigned char> junk(9, 0xab);
+        ss << unknown << junk;
+        unsigned short port = 0;
+        ss << port;
+        CService got;
+        ss >> got;
+        BOOST_CHECK(!got.IsValid());
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

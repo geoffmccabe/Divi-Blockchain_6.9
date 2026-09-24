@@ -275,6 +275,9 @@ public:
     std::vector<CAddress> vAddrToSend;
     mruset<CAddress> setAddrKnown;
     bool fGetAddr;
+    /** The peer said "sendaddrv2": it understands the addrv2 form, so it
+     *  can be told about every kind of address, relayed ones included. */
+    bool fWantsAddrV2;
 
     // inventory based relay
     mruset<CInv> setInventoryKnown;

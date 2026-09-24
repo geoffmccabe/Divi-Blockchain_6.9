@@ -9,6 +9,9 @@
 
 #include "clientversion.h"
 #include "net.h"
+#include "NodeKey.h"
+#include "addrman.h"
+#include "utilstrencodings.h"
 #include <Node.h>
 #include "netbase.h"
 #include "protocol.h"
@@ -151,6 +154,59 @@ Value getpeerinfo(const Array& params, bool fHelp, CWallet* pwallet)
     }
 
     return ret;
+}
+
+/* ---- Address-book access, for testing the address gossip (Part A2) ----
+   The same two calls Bitcoin has for the same reason: put one address into
+   this node's book by hand, and read the book back. Any address kind,
+   relayed ones included. */
+Value addpeeraddress(const Array& params, bool fHelp, CWallet* pwallet)
+{
+    if (fHelp || params.size() < 1 || params.size() > 2)
+        throw std::runtime_error(
+            "addpeeraddress \"address\" ( port )\n"
+            "\nAdd an address to this node's address book, as if a peer had told us about it.\n"
+            "\"address\" may be an IP, or a relayed address: relay:<node key hex>@<helper ip>:<port>\n"
+            "\nResult: { \"success\": true|false }\n");
+    std::string str = params[0].get_str();
+    int port = params.size() > 1 ? params[1].get_int() : Params().GetDefaultPort();
+    CService service;
+    CNetAddr special;
+    if (special.SetSpecial(str)) {
+        service = CService(special, special.IsRelay() ? special.RelayHelper().GetPort() : port);
+    } else if (!Lookup(str.c_str(), service, port, false)) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "not an address");
+    }
+    CAddress addr(service);
+    addr.nTime = GetAdjustedTime();
+    bool ok = GetNetworkAddressManager().Add(addr, addr);
+    Object obj;
+    obj.push_back(Pair("success", ok));
+    obj.push_back(Pair("address", addr.ToString()));
+    return obj;
+}
+
+Value getnodeaddresses(const Array& params, bool fHelp, CWallet* pwallet)
+{
+    if (fHelp || params.size() > 1)
+        throw std::runtime_error(
+            "getnodeaddresses ( count )\n"
+            "\nAddresses this node knows about, from its address book (default 1000, 0 = all).\n");
+    int count = params.size() > 0 ? params[0].get_int() : 1000;
+    /* 0 = the whole book; otherwise the same random sample peers get. */
+    std::vector<CAddress> all = count == 0 ? GetNetworkAddressManager().GetAllAddr() : GetNetworkAddressManager().GetAddr();
+    Array out;
+    for (const CAddress& a : all) {
+        if (count > 0 && (int)out.size() >= count) break;
+        Object o;
+        o.push_back(Pair("time", (int64_t)a.nTime));
+        o.push_back(Pair("services", (uint64_t)a.nServices));
+        o.push_back(Pair("address", a.ToStringIP()));
+        o.push_back(Pair("port", (int)a.GetPort()));
+        o.push_back(Pair("network", GetNetworkName(a.GetNetwork())));
+        out.push_back(o);
+    }
+    return out;
 }
 
 Value addnode(const Array& params, bool fHelp, CWallet* pwallet)
@@ -386,5 +442,7 @@ Value getnetworkinfo(const Array& params, bool fHelp, CWallet* pwallet)
         localAddresses.push_back(rec);
     }
     obj.push_back(Pair("localaddresses", localAddresses));
+    /* The node's identity (Part A3): what a relayed address names it by. */
+    obj.push_back(Pair("nodekey", HexStr(GetNodeKeyBytes())));
     return obj;
 }

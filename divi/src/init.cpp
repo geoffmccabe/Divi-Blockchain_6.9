@@ -28,6 +28,7 @@
 #include <WalletBackupFeatureContainer.h>
 #include <miner.h>
 #include "net.h"
+#include "NodeKey.h"
 #include "rpcserver.h"
 #include "spork.h"
 #include "sporkdb.h"
@@ -1629,6 +1630,13 @@ bool InitializeDivi(boost::thread_group& threadGroup)
     if (settings.GetBoolArg("-listenonion", DEFAULT_LISTEN_ONION))
         StartTorControl(threadGroup);
 
+    /* The node's identity key (docs/PEER-RELAY-SPEC.md, A3), before the
+       network starts so relayed addresses can name us from the first peer. */
+    {
+        std::string keyError;
+        if (!LoadOrCreateNodeKey(keyError))
+            return InitError("Node key: " + keyError);
+    }
     uiInterface.InitMessage(translate("Initializing P2P connections..."));
     StartNode(settings, cs_main, threadGroup);
 #ifdef ENABLE_WALLET

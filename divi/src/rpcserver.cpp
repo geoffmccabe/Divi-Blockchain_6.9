@@ -48,6 +48,8 @@ extern json_spirit::Value addnode(const json_spirit::Array& params, bool fHelp, 
 extern json_spirit::Value getaddednodeinfo(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value getnettotals(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 extern json_spirit::Value getnetworkinfo(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
+extern json_spirit::Value addpeeraddress(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
+extern json_spirit::Value getnodeaddresses(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
 
 extern json_spirit::Value importprivkey(const json_spirit::Array& params, bool fHelp, CWallet* pwallet); // in rpcdump.cpp
 extern json_spirit::Value importaddress(const json_spirit::Array& params, bool fHelp, CWallet* pwallet);
@@ -335,6 +337,8 @@ static const CRPCCommand vRPCCommands[] =
         /* P2P networking */
         {"network", "getnetworkinfo", &getnetworkinfo, true, false, false,false},
         {"network", "addnode", &addnode, true, true, false,false},
+        {"network", "addpeeraddress", &addpeeraddress, true, true, false,false},
+        {"network", "getnodeaddresses", &getnodeaddresses, true, true, false,false},
         {"network", "getaddednodeinfo", &getaddednodeinfo, true, true, false,false},
         {"network", "getconnectioncount", &getconnectioncount, true, false, false, false},
         {"network", "getnettotals", &getnettotals, true, true, false, false},

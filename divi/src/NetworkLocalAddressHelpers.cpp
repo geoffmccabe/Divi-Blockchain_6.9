@@ -169,6 +169,9 @@ bool IsReachable(enum Network net)
 /** check whether a given address is in a network we can probably connect to */
 bool IsReachable(const CNetAddr& addr)
 {
+    /* A relayed node is reached through its helper, a plain IP node. */
+    if (addr.IsRelay())
+        return IsReachable(addr.RelayHelper().GetNetwork());
     enum Network net = addr.GetNetwork();
     return IsReachable(net);
 }

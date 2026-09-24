@@ -308,6 +308,7 @@ BITCOIN_CORE_H = \
   NodeId.h \
   NodeStats.h \
   NetworkLocalAddressHelpers.h \
+  NodeKey.h \
   PeerBanningService.h \
   OutputEntry.h \
   noui.h \
@@ -524,6 +525,7 @@ libbitcoin_server_a_SOURCES = \
   SocketChannel.cpp \
   NodeStats.cpp \
   NetworkLocalAddressHelpers.cpp \
+  NodeKey.cpp \
   PeerBanningService.cpp \
   netfulfilledman.cpp \
   noui.cpp \

@@ -1163,6 +1163,12 @@ void ThreadOpenConnections()
             if (IsLimited(addr))
                 continue;
 
+            /* Relayed addresses are carried and gossiped (Part A of the
+               peer-relay spec) but connecting through a helper is Part B:
+               until it lands, they are not dialled. */
+            if (addr.IsRelay())
+                continue;
+
             // only consider very recently tried nodes after 30 failed attempts
             if (nANow - addr.nLastTry < 600 && nTries < 30)
                 continue;

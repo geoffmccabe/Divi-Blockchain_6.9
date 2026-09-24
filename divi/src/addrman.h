@@ -277,7 +277,10 @@ public:
     {
         LOCK(cs);
 
-        unsigned char nVersion = 1;
+        /* Format 2 (2026-Sep): entries in the addrv2 form, so relayed
+           addresses survive a restart. A node that reads a format it does
+           not know throws, and the caller starts with a fresh peers file. */
+        unsigned char nVersion = 2;
         s << nVersion;
         s << ((unsigned char)32);
         s << nKey;
@@ -293,7 +296,7 @@ public:
             const CAddrInfo& info = (*it).second;
             if (info.nRefCount) {
                 assert(nIds != nNew); // this means nNew was wrong, oh ow
-                s << info;
+                ::Serialize(s, info, nType, nVersionDummy | ADDRV2_FORMAT);
                 nIds++;
             }
         }
@@ -302,7 +305,7 @@ public:
             const CAddrInfo& info = (*it).second;
             if (info.fInTried) {
                 assert(nIds != nTried); // this means nTried was wrong, oh ow
-                s << info;
+                ::Serialize(s, info, nType, nVersionDummy | ADDRV2_FORMAT);
                 nIds++;
             }
         }
@@ -331,6 +334,8 @@ public:
 
         unsigned char nVersion;
         s >> nVersion;
+        if (nVersion > 2) throw std::ios_base::failure("Unknown addrman format");
+        const int nEntryVersion = nVersion >= 2 ? (nVersionDummy | ADDRV2_FORMAT) : nVersionDummy;
         unsigned char nKeySize;
         s >> nKeySize;
         if (nKeySize != 32) throw std::ios_base::failure("Incorrect keysize in addrman deserialization");
@@ -346,11 +351,11 @@ public:
         // Deserialize entries from the new table.
         for (int n = 0; n < nNew; n++) {
             CAddrInfo& info = mapInfo[n];
-            s >> info;
+            ::Unserialize(s, info, nType, nEntryVersion);
             mapAddr[info] = n;
             info.nRandomPos = vRandom.size();
             vRandom.push_back(n);
-            if (nVersion != 1 || nUBuckets != ADDRMAN_NEW_BUCKET_COUNT) {
+            if (nVersion < 1 || nUBuckets != ADDRMAN_NEW_BUCKET_COUNT) {
                 // In case the new table data cannot be used (nVersion unknown, or bucket count wrong),
                 // immediately try to give them a reference based on their primary source address.
                 int nUBucket = info.GetNewBucket(nKey);
@@ -367,7 +372,7 @@ public:
         int nLost = 0;
         for (int n = 0; n < nTried; n++) {
             CAddrInfo info;
-            s >> info;
+            ::Unserialize(s, info, nType, nEntryVersion);
             int nKBucket = info.GetTriedBucket(nKey);
             int nKBucketPos = info.GetBucketPosition(nKey, false, nKBucket);
             if (vvTried[nKBucket][nKBucketPos] == -1) {
@@ -394,7 +399,7 @@ public:
                 if (nIndex >= 0 && nIndex < nNew) {
                     CAddrInfo& info = mapInfo[nIndex];
                     int nUBucketPos = info.GetBucketPosition(nKey, true, bucket);
-                    if (nVersion == 1 && nUBuckets == ADDRMAN_NEW_BUCKET_COUNT && vvNew[bucket][nUBucketPos] == -1 && info.nRefCount < ADDRMAN_NEW_BUCKETS_PER_ADDRESS) {
+                    if (nVersion >= 1 && nUBuckets == ADDRMAN_NEW_BUCKET_COUNT && vvNew[bucket][nUBucketPos] == -1 && info.nRefCount < ADDRMAN_NEW_BUCKETS_PER_ADDRESS) {
                         info.nRefCount++;
                         vvNew[bucket][nUBucketPos] = nIndex;
                     }
@@ -541,6 +546,16 @@ public:
             Check();
         }
         return addrRet;
+    }
+
+    //! Every address in the book, in no particular order. For inspection
+    //! (getnodeaddresses 0), never for the wire, which uses GetAddr().
+    std::vector<CAddress> GetAllAddr()
+    {
+        std::vector<CAddress> vAddr;
+        LOCK(cs);
+        for (const auto& entry : mapInfo) vAddr.push_back(entry.second);
+        return vAddr;
     }
 
     //! Return a bunch of addresses, selected at random.

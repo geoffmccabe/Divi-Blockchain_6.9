@@ -73,6 +73,7 @@ enum Network ParseNetwork(std::string net)
     if (net == "ipv4") return NET_IPV4;
     if (net == "ipv6") return NET_IPV6;
     if (net == "tor" || net == "onion") return NET_TOR;
+    if (net == "relay") return NET_RELAY;
     return NET_UNROUTABLE;
 }
 
@@ -85,6 +86,8 @@ std::string GetNetworkName(enum Network net)
         return "ipv6";
     case NET_TOR:
         return "onion";
+    case NET_RELAY:
+        return "relay";
     default:
         return "";
     }
@@ -654,18 +657,138 @@ bool ConnectSocketByName(CService& addr, SOCKET& hSocketRet, const char* pszDest
     return ConnectThroughProxy(nameProxy, strDest, port, hSocketRet, nTimeout, outProxyConnectionFailed);
 }
 
+static const unsigned char pchOnionCat[] = {0xFD, 0x87, 0xD8, 0x7E, 0xEB, 0x43};
+
 void CNetAddr::Init()
 {
     memset(ip, 0, sizeof(ip));
+    m_ext = NET_UNROUTABLE;
+    m_extBytes.clear();
 }
 
 void CNetAddr::SetIP(const CNetAddr& ipIn)
 {
     memcpy(ip, ipIn.ip, sizeof(ip));
+    m_ext = ipIn.m_ext;
+    m_extBytes = ipIn.m_extBytes;
+}
+
+/* ---- RELAYED ADDRESSES ----
+   Bytes: node key (33) | helper kind (1: ADDRV2_IPV4 or ADDRV2_IPV6) |
+   helper address (4 or 16) | helper port (2, big-endian). The 16-byte `ip`
+   slot holds the first 16 bytes of the hash of those bytes, so everything
+   that compares or hashes addresses by their bytes keeps working and two
+   relayed addresses collide only if they are the same. */
+static void SetExtHash(unsigned char* ip, const std::vector<unsigned char>& bytes)
+{
+    uint256 h = Hash(bytes.begin(), bytes.end());
+    memcpy(ip, h.begin(), 16);
+}
+
+bool CNetAddr::SetRelay(const std::vector<unsigned char>& key, const CService& helper)
+{
+    if (key.size() != RELAY_KEY_SIZE) return false;
+    if (helper.IsRelay() || helper.IsTor() || !helper.IsValid() || helper.GetPort() == 0) return false;
+    std::vector<unsigned char> b(key);
+    if (helper.IsIPv4()) {
+        b.push_back(ADDRV2_IPV4);
+        b.insert(b.end(), helper.ip + 12, helper.ip + 16);
+    } else {
+        b.push_back(ADDRV2_IPV6);
+        b.insert(b.end(), helper.ip, helper.ip + 16);
+    }
+    unsigned short port = helper.GetPort();
+    b.push_back((unsigned char)(port >> 8));
+    b.push_back((unsigned char)(port & 0xff));
+    m_ext = NET_RELAY;
+    m_extBytes = b;
+    SetExtHash(ip, b);
+    return true;
+}
+
+bool CNetAddr::IsRelay() const
+{
+    return m_ext == NET_RELAY;
+}
+
+std::vector<unsigned char> CNetAddr::RelayKey() const
+{
+    if (!IsRelay() || m_extBytes.size() < RELAY_KEY_SIZE) return {};
+    return std::vector<unsigned char>(m_extBytes.begin(), m_extBytes.begin() + RELAY_KEY_SIZE);
+}
+
+CService CNetAddr::RelayHelper() const
+{
+    CService out;
+    if (!IsRelay() || m_extBytes.size() < RELAY_KEY_SIZE + 1 + 4 + 2) return out;
+    size_t at = RELAY_KEY_SIZE;
+    unsigned char kind = m_extBytes[at++];
+    size_t len = kind == ADDRV2_IPV4 ? 4 : (kind == ADDRV2_IPV6 ? 16 : 0);
+    if (len == 0 || m_extBytes.size() != at + len + 2) return out;
+    CNetAddr a;
+    a.SetRaw(kind == ADDRV2_IPV4 ? NET_IPV4 : NET_IPV6, &m_extBytes[at]);
+    at += len;
+    unsigned short port = (unsigned short)((m_extBytes[at] << 8) | m_extBytes[at + 1]);
+    return CService(a, port);
+}
+
+void CNetAddr::ToV2(unsigned char& id, std::vector<unsigned char>& bytes) const
+{
+    bytes.clear();
+    if (IsRelay()) {
+        id = ADDRV2_RELAY;
+        bytes = m_extBytes;
+    } else if (IsTor()) {
+        id = ADDRV2_TORV2;
+        bytes.assign(ip + 6, ip + 16);
+    } else if (IsIPv4()) {
+        id = ADDRV2_IPV4;
+        bytes.assign(ip + 12, ip + 16);
+    } else {
+        id = ADDRV2_IPV6;
+        bytes.assign(ip, ip + 16);
+    }
+}
+
+void CNetAddr::SetFromV2(unsigned char id, const std::vector<unsigned char>& bytes)
+{
+    Init();
+    switch (id) {
+    case ADDRV2_IPV4:
+        if (bytes.size() == 4) SetRaw(NET_IPV4, bytes.data());
+        break;
+    case ADDRV2_IPV6:
+        if (bytes.size() == 16) SetRaw(NET_IPV6, bytes.data());
+        break;
+    case ADDRV2_TORV2:
+        if (bytes.size() == 10) {
+            memcpy(ip, pchOnionCat, sizeof(pchOnionCat));
+            memcpy(ip + 6, bytes.data(), 10);
+        }
+        break;
+    case ADDRV2_RELAY: {
+        /* Rebuilt through SetRelay so a malformed one is rejected the same
+           way a typed one is. */
+        if (bytes.size() < RELAY_KEY_SIZE + 1 + 4 + 2) break;
+        CNetAddr tmp;
+        tmp.m_ext = NET_RELAY;
+        tmp.m_extBytes = bytes;
+        CService helper = tmp.RelayHelper();
+        std::vector<unsigned char> key(bytes.begin(), bytes.begin() + RELAY_KEY_SIZE);
+        SetRelay(key, helper);
+        break;
+    }
+    default:
+        /* An address kind this node does not know: left unspecified, which
+           IsValid() rejects, so it is dropped like any junk address. */
+        break;
+    }
 }
 
 void CNetAddr::SetRaw(Network network, const uint8_t* ip_in)
 {
+    m_ext = NET_UNROUTABLE;
+    m_extBytes.clear();
     switch (network) {
     case NET_IPV4:
         memcpy(ip, pchIPv4, 12);
@@ -679,10 +802,20 @@ void CNetAddr::SetRaw(Network network, const uint8_t* ip_in)
     }
 }
 
-static const unsigned char pchOnionCat[] = {0xFD, 0x87, 0xD8, 0x7E, 0xEB, 0x43};
-
 bool CNetAddr::SetSpecial(const std::string& strName)
 {
+    /* relay:<66 hex chars of node key>@<helper ip>:<port>, the printed form
+       of a relayed address (see ToStringIP). */
+    if (strName.size() > 6 && strName.compare(0, 6, "relay:") == 0) {
+        size_t at = strName.find('@');
+        if (at == std::string::npos) return false;
+        std::string hex = strName.substr(6, at - 6);
+        if (!IsHex(hex)) return false;
+        std::vector<unsigned char> key = ParseHex(hex);
+        CService helper;
+        if (!Lookup(strName.substr(at + 1).c_str(), helper, 0, false)) return false;
+        return SetRelay(key, helper);
+    }
     if (strName.size() > 6 && strName.substr(strName.size() - 6, 6) == ".onion") {
         std::vector<unsigned char> vchAddr = DecodeBase32(strName.substr(0, strName.size() - 6).c_str());
         if (vchAddr.size() != 16 - sizeof(pchOnionCat))
@@ -702,11 +835,13 @@ CNetAddr::CNetAddr()
 
 CNetAddr::CNetAddr(const struct in_addr& ipv4Addr)
 {
+    Init();
     SetRaw(NET_IPV4, (const uint8_t*)&ipv4Addr);
 }
 
 CNetAddr::CNetAddr(const struct in6_addr& ipv6Addr)
 {
+    Init();
     SetRaw(NET_IPV6, (const uint8_t*)&ipv6Addr);
 }
 
@@ -815,7 +950,7 @@ bool CNetAddr::IsRFC4843() const
 
 bool CNetAddr::IsTor() const
 {
-    return (memcmp(ip, pchOnionCat, sizeof(pchOnionCat)) == 0);
+    return m_ext == NET_UNROUTABLE && (memcmp(ip, pchOnionCat, sizeof(pchOnionCat)) == 0);
 }
 
 bool CNetAddr::IsLocal() const
@@ -839,6 +974,12 @@ bool CNetAddr::IsMulticast() const
 
 bool CNetAddr::IsValid() const
 {
+    /* A relayed address is valid when its helper is a valid, routable IP
+       with a port and its key has the right size. */
+    if (IsRelay()) {
+        CService helper = RelayHelper();
+        return RelayKey().size() == RELAY_KEY_SIZE && helper.IsValid() && helper.IsRoutable() && helper.GetPort() != 0;
+    }
     // Cleanup 3-byte shifted addresses caused by garbage in size field
     // of addr messages from versions before 0.2.9 checksum.
     // Two consecutive addr messages look like this:
@@ -874,6 +1015,7 @@ bool CNetAddr::IsValid() const
 
 bool CNetAddr::IsRoutable() const
 {
+    if (IsRelay()) return IsValid();
     return IsValid() && !(IsRFC1918() || IsRFC2544() || IsRFC3927() || IsRFC4862() || IsRFC6598() || IsRFC5737() || (IsRFC4193() && !IsTor()) || IsRFC4843() || IsLocal());
 }
 
@@ -881,6 +1023,9 @@ enum Network CNetAddr::GetNetwork() const
 {
     if (!IsRoutable())
         return NET_UNROUTABLE;
+
+    if (IsRelay())
+        return NET_RELAY;
 
     if (IsIPv4())
         return NET_IPV4;
@@ -893,6 +1038,8 @@ enum Network CNetAddr::GetNetwork() const
 
 std::string CNetAddr::ToStringIP() const
 {
+    if (IsRelay())
+        return "relay:" + HexStr(RelayKey()) + "@" + RelayHelper().ToStringIPPort();
     if (IsTor())
         return EncodeBase32(&ip[6], 10) + ".onion";
     CService serv(*this, 0);
@@ -918,18 +1065,22 @@ std::string CNetAddr::ToString() const
     return ToStringIP();
 }
 
+/* Extended kinds compare by kind first, then by the hash in `ip`, which
+   is what the bytes-only comparison already does; so the old order and
+   equality hold for IP addresses and extend naturally. */
 bool operator==(const CNetAddr& a, const CNetAddr& b)
 {
-    return (memcmp(a.ip, b.ip, 16) == 0);
+    return a.m_ext == b.m_ext && (memcmp(a.ip, b.ip, 16) == 0) && a.m_extBytes == b.m_extBytes;
 }
 
 bool operator!=(const CNetAddr& a, const CNetAddr& b)
 {
-    return (memcmp(a.ip, b.ip, 16) != 0);
+    return !(a == b);
 }
 
 bool operator<(const CNetAddr& a, const CNetAddr& b)
 {
+    if (a.m_ext != b.m_ext) return a.m_ext < b.m_ext;
     return (memcmp(a.ip, b.ip, 16) < 0);
 }
 
@@ -955,6 +1106,16 @@ std::vector<unsigned char> CNetAddr::GetGroup() const
     int nClass = NET_IPV6;
     int nStartByte = 0;
     int nBits = 16;
+
+    /* A relayed node is its own group, keyed by its node key: many home
+       nodes behind one helper each count as their own group, so the
+       one-outbound-per-group rule does not starve them. */
+    if (IsRelay()) {
+        vchRet.push_back(NET_RELAY);
+        std::vector<unsigned char> key = RelayKey();
+        vchRet.insert(vchRet.end(), key.begin(), key.end());
+        return vchRet;
+    }
 
     // all local addresses belong to the same group
     if (IsLocal()) {
@@ -1010,6 +1171,7 @@ std::vector<unsigned char> CNetAddr::GetGroup() const
 
 uint64_t CNetAddr::GetHash() const
 {
+    /* For an extended kind `ip` already is a hash of its bytes. */
     uint256 hash = Hash(&ip[0], &ip[16]);
     uint64_t nRet;
     memcpy(&nRet, &hash, sizeof(nRet));
@@ -1076,6 +1238,17 @@ int CNetAddr::GetReachabilityFrom(const CNetAddr* paddrPartner) const
             return REACH_IPV4; // Tor users can connect to IPv4 as well
         case NET_TOR:
             return REACH_PRIVATE;
+        }
+    case NET_RELAY:
+        /* A relayed peer reaches us through its helper, which is a plain
+           IP node, so our IP addresses are what to tell it. */
+        switch (ourNet) {
+        default:
+            return REACH_DEFAULT;
+        case NET_IPV4:
+            return REACH_IPV4;
+        case NET_IPV6:
+            return fTunnel ? REACH_IPV6_WEAK : REACH_IPV6_STRONG;
         }
     case NET_TEREDO:
         switch (ourNet) {
@@ -1324,7 +1497,7 @@ CSubNet::CSubNet(const std::string& strSubnet, bool fAllowLookup)
 
 bool CSubNet::Match(const CNetAddr& addr) const
 {
-    if (!valid || !addr.IsValid())
+    if (!valid || !addr.IsValid() || addr.IsRelay())
         return false;
     for (int x = 0; x < 16; ++x)
         if ((addr.ip[x] & netmask[x]) != network.ip[x])

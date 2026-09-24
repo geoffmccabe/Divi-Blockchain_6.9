@@ -122,6 +122,31 @@ public:
     int64_t nLastTry;
 };
 
+/** A list of addresses written in the addrv2 form whatever the stream's
+ *  own version: the body of the "addrv2" message (docs/PEER-RELAY-SPEC.md,
+ *  Part A2). The legacy "addr" message keeps its exact old form. */
+class CAddrV2List
+{
+public:
+    std::vector<CAddress>& v;
+    explicit CAddrV2List(std::vector<CAddress>& vIn) : v(vIn) {}
+
+    unsigned int GetSerializeSize(int nType, int nVersion) const
+    {
+        return ::GetSerializeSize(v, nType, nVersion | ADDRV2_FORMAT);
+    }
+    template <typename Stream>
+    void Serialize(Stream& s, int nType, int nVersion) const
+    {
+        ::Serialize(s, v, nType, nVersion | ADDRV2_FORMAT);
+    }
+    template <typename Stream>
+    void Unserialize(Stream& s, int nType, int nVersion)
+    {
+        ::Unserialize(s, v, nType, nVersion | ADDRV2_FORMAT);
+    }
+};
+
 /** inv message data */
 
 enum InventoryType {
