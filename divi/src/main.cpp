@@ -15,6 +15,7 @@
 #include <sstream>
 
 #include <addrman.h>
+#include "PeerRelay.h"
 #include <BlockDiskAccessor.h>
 #include <blockmap.h>
 #include <chainparams.h>
@@ -398,7 +399,7 @@ static bool SetPeerVersionAndServices(CCriticalSection& mainCriticalSection, CNo
     }
 
     pfrom->addrLocal = addrMe;
-    if (pfrom->fInbound && addrMe.IsRoutable()) {
+    if (pfrom->fInbound && addrMe.IsRoutable() && !addrMe.IsRelay()) {
         SeenLocal(addrMe);
     }
 
@@ -489,6 +490,13 @@ bool static ProcessMessage(CCriticalSection& mainCriticalSection, CNode* pfrom, 
             return false;
         }
         return true;
+    }
+    else if (PeerRelay::IsRelayCommand(strCommand) && (pfrom->GetVersion() != 0 || PeerRelay::IsPreVersionCommand(strCommand)))
+    {
+        /* The relay's own messages. Two of them (relay-connect and
+           relay-answer) come on a fresh connection before any version, on
+           purpose: the connection is being turned into a pipe. */
+        return PeerRelay::HandleMessage(pfrom, strCommand, vRecv);
     }
     else if (pfrom->GetVersion() == 0)
     {
@@ -1298,6 +1306,9 @@ void PeriodicallyRebroadcastMempoolTxs(CCriticalSection& mainCriticalSection, CT
 
 bool SendMessages(CNode* pto, bool fSendTrickle)
 {
+    /* One end of a helper's pipe carries other people's bytes and nothing
+       of ours: no pings, no addresses, no inventory. */
+    if (pto->fRelayPipe) return true;
     {
         if (fSendTrickle) {
             SendAddresses(pto);

@@ -34,6 +34,7 @@ CAddress GetLocalAddress(const CNetAddr* paddrPeer = NULL);
 unsigned short GetListenPort();
 const uint64_t& GetLocalServices();
 void EnableBloomFilters();
+void EnableRelayHelper();
 bool BloomFiltersAreEnabled();
 bool IsListening();
 void setListeningFlag(bool updatedListenFlag);

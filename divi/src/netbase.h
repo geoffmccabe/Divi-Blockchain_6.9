@@ -60,6 +60,10 @@ enum AddrV2NetId : unsigned char {
 
 /** Size of a node key (compressed secp256k1 public key). */
 static const size_t RELAY_KEY_SIZE = 33;
+/** Test only (regtest): let a relayed address use a local helper, so the
+ *  relay can be exercised on one machine. Never set on a real network. */
+void SetRelayAllowLocalHelpers(bool allow);
+bool RelayAllowLocalHelpers();
 
 /** IP address (IPv6, or IPv4 using mapped IPv6 range (::FFFF:0:0/96)) */
 class CService;

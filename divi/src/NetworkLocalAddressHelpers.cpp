@@ -224,6 +224,10 @@ const uint64_t& GetLocalServices()
 {
     return nLocalServices;
 }
+void EnableRelayHelper()
+{
+    nLocalServices |= NODE_RELAY_HELPER;
+}
 void EnableBloomFilters()
 {
     nLocalServices |= NODE_BLOOM;

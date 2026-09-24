@@ -29,6 +29,7 @@
 #include <miner.h>
 #include "net.h"
 #include "NodeKey.h"
+#include "PeerRelay.h"
 #include "rpcserver.h"
 #include "spork.h"
 #include "sporkdb.h"
@@ -1636,6 +1637,15 @@ bool InitializeDivi(boost::thread_group& threadGroup)
         std::string keyError;
         if (!LoadOrCreateNodeKey(keyError))
             return InitError("Node key: " + keyError);
+    }
+    /* Offer to help home nodes (docs/PEER-RELAY-SPEC.md, B2): on by default
+       for any listening node; -relayhelper=0 turns it off. */
+    if (PeerRelay::HelpingEnabled() && settings.GetBoolArg("-listen", true))
+        EnableRelayHelper();
+    /* Test hook: behave as a home node at once (regtest only). */
+    if (Params().NetworkID() == CBaseChainParams::REGTEST) {
+        if (settings.GetBoolArg("-relaytestforcehome", false)) PeerRelay::ForceHomeNodeForTesting(true);
+        if (settings.GetBoolArg("-relaytestlocalhelpers", false)) SetRelayAllowLocalHelpers(true);
     }
     uiInterface.InitMessage(translate("Initializing P2P connections..."));
     StartNode(settings, cs_main, threadGroup);

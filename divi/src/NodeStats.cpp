@@ -18,6 +18,8 @@ CNodeStats::CNodeStats(const CNode* pnode)
     addrName = pnode->GetAddressName();
     X(cleanSubVer);
     X(fInbound);
+    X(fRelayed);
+    X(fRelayPipe);
     X(nStartingHeight);
     X(fWhitelisted);
 

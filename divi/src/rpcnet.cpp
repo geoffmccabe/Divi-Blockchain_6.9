@@ -10,6 +10,7 @@
 #include "clientversion.h"
 #include "net.h"
 #include "NodeKey.h"
+#include "PeerRelay.h"
 #include "addrman.h"
 #include "utilstrencodings.h"
 #include <Node.h>
@@ -135,6 +136,10 @@ Value getpeerinfo(const Array& params, bool fHelp, CWallet* pwallet)
         // their ver message.
         obj.push_back(Pair("subver", stats.cleanSubVer));
         obj.push_back(Pair("inbound", stats.fInbound));
+        /* Through a helper (docs/PEER-RELAY-SPEC.md); a "relaypipe" entry
+           is one end of a pipe this node is carrying for others. */
+        obj.push_back(Pair("relayed", stats.fRelayed));
+        obj.push_back(Pair("relaypipe", stats.fRelayPipe));
         obj.push_back(Pair("startingheight", stats.nStartingHeight));
         if(statestats.stateFound)
         {
@@ -444,5 +449,6 @@ Value getnetworkinfo(const Array& params, bool fHelp, CWallet* pwallet)
     obj.push_back(Pair("localaddresses", localAddresses));
     /* The node's identity (Part A3): what a relayed address names it by. */
     obj.push_back(Pair("nodekey", HexStr(GetNodeKeyBytes())));
+    obj.push_back(Pair("relay", PeerRelay::Status()));
     return obj;
 }

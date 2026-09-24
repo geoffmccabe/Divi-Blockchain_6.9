@@ -10,6 +10,7 @@
 #endif
 
 #include "net.h"
+#include "PeerRelay.h"
 
 #include "addrman.h"
 #include <bloom.h>
@@ -235,22 +236,30 @@ public:
     }
     void disconnectUnusedNodes()
     {
-        LOCK(cs_vNodes);
-        // Disconnect unused nodes
-        std::vector<CNode*> vNodesCopy = vNodes_;
-        for(CNode* pnode: vNodesCopy)
+        /* The relay is told AFTER the nodes lock is released: it takes its
+           own lock first and then this one, and taking them the other way
+           round here would be a deadlock waiting to happen. */
+        std::vector<CNode*> gone;
         {
-            if (pnode->IsFlaggedForDisconnection() || pnode->CanBeDisconnected())
+            LOCK(cs_vNodes);
+            // Disconnect unused nodes
+            std::vector<CNode*> vNodesCopy = vNodes_;
+            for(CNode* pnode: vNodesCopy)
             {
-                // remove from vNodes
-                vNodes_.erase(remove(vNodes_.begin(), vNodes_.end(), pnode), vNodes_.end());
-                // close socket and cleanup
-                pnode->CloseCommsAndDisconnect();
+                if (pnode->IsFlaggedForDisconnection() || pnode->CanBeDisconnected())
+                {
+                    // remove from vNodes
+                    vNodes_.erase(remove(vNodes_.begin(), vNodes_.end(), pnode), vNodes_.end());
+                    // close socket and cleanup
+                    pnode->CloseCommsAndDisconnect();
 
-                pnode->Release();
-                queueForDisconnection(pnode);
+                    pnode->Release();
+                    queueForDisconnection(pnode);
+                    gone.push_back(pnode);
+                }
             }
         }
+        for (CNode* pnode : gone) PeerRelay::OnPeerDisconnected(pnode);
     }
     void deleteDisconnectedNodes(bool forceDelete = false)
     {
@@ -410,6 +419,33 @@ int GetPeerCount()
     LOCK(cs_vNodes);
     return vNodes.size();
 }
+int GetInboundPeerCount()
+{
+    LOCK(cs_vNodes);
+    int n = 0;
+    for (CNode* pnode : vNodes) if (pnode->fInbound && !pnode->fRelayPipe) n++;
+    return n;
+}
+int GetOutboundPeerCount()
+{
+    LOCK(cs_vNodes);
+    int n = 0;
+    for (CNode* pnode : vNodes) if (!pnode->fInbound && !pnode->fRelayPipe) n++;
+    return n;
+}
+void ForEachNode(const std::function<void(CNode*)>& fn)
+{
+    LOCK(cs_vNodes);
+    for (CNode* pnode : vNodes) fn(pnode);
+}
+bool WithNodeById(NodeId id, const std::function<void(CNode*)>& fn)
+{
+    LOCK(cs_vNodes);
+    for (CNode* pnode : vNodes) {
+        if (pnode->GetId() == id) { fn(pnode); return true; }
+    }
+    return false;
+}
 void SchedulePingingPeers()
 {
     LOCK(cs_vNodes);
@@ -496,6 +532,15 @@ CNode* FindNode(const CService& addr)
 
 NodeRef ConnectNode(CAddress addrConnect, const char* pszDest = NULL, const bool oneShot = false)
 {
+    /* A relayed address given by name (addnode relay:...) is resolved here
+       and then treated exactly like one from the address book. */
+    if (pszDest != NULL) {
+        CService named;
+        if (Lookup(pszDest, named, Params().GetDefaultPort(), false) && named.IsRelay()) {
+            addrConnect = CAddress(named);
+            pszDest = NULL;
+        }
+    }
     if (pszDest == NULL) {
         // we clean masternode connections in CMasternodeMan::ProcessMasternodeConnections()
         // so should be safe to skip this and connect to local Hot MN on CActiveMasternode::ManageStatus()
@@ -518,6 +563,27 @@ NodeRef ConnectNode(CAddress addrConnect, const char* pszDest = NULL, const bool
     CAddrMan& addrman = GetNetworkAddressManager();
     SOCKET hSocket;
     bool proxyConnectionFailed = false;
+    /* ---- A RELAYED NODE: through its helper ----
+       Connect to the helper, ask to be put through, and from then on the
+       socket IS the relayed node (docs/PEER-RELAY-SPEC.md, B3). */
+    if (pszDest == NULL && addrConnect.IsRelay()) {
+        const CService helper = addrConnect.RelayHelper();
+        if (!ConnectSocket(helper, hSocket, getConnectionTimeoutDuration(), &proxyConnectionFailed)) {
+            addrman.Attempt(addrConnect);
+            return NodeReferenceFactory::makeUniqueNodeReference(nullptr);
+        }
+        std::string error;
+        if (!PeerRelay::CallerHandshake(hSocket, addrConnect.RelayKey(), error)) {
+            LogPrint("net", "relay: %s via %s: %s\n", addrConnect.ToString(), helper.ToString(), error);
+            CloseSocket(hSocket);
+            addrman.Attempt(addrConnect);
+            return NodeReferenceFactory::makeUniqueNodeReference(nullptr);
+        }
+        addrman.Attempt(addrConnect);
+        CNode* pnode = CreateNode(hSocket, &GetNodeSignals(), GetNetworkAddressManager(), addrConnect, "", oneShot? NodeConnectionFlags::ONE_SHOT : NodeConnectionFlags::DEFAULT);
+        if (pnode) pnode->fRelayed = true;
+        return NodeReferenceFactory::makeUniqueNodeReference(pnode);
+    }
     if (pszDest ? ConnectSocketByName(addrConnect, hSocket, pszDest, Params().GetDefaultPort(), getConnectionTimeoutDuration(), &proxyConnectionFailed) :
                   ConnectSocket(addrConnect, hSocket, getConnectionTimeoutDuration(), &proxyConnectionFailed)) {
         if (!IsSelectableSocket(hSocket)) {
@@ -539,6 +605,27 @@ NodeRef ConnectNode(CAddress addrConnect, const char* pszDest = NULL, const bool
 
     return NodeReferenceFactory::makeUniqueNodeReference(nullptr);
 }
+void AcceptRelayedConnection(CService helper, std::vector<unsigned char> token)
+{
+    SOCKET hSocket;
+    bool proxyConnectionFailed = false;
+    if (!ConnectSocket(helper, hSocket, getConnectionTimeoutDuration(), &proxyConnectionFailed)) {
+        LogPrint("net", "relay: could not reach helper %s to answer\n", helper.ToString());
+        return;
+    }
+    std::string error;
+    if (!PeerRelay::AnswerHandshake(hSocket, token, error)) {
+        LogPrint("net", "relay: answering via %s failed: %s\n", helper.ToString(), error);
+        CloseSocket(hSocket);
+        return;
+    }
+    /* From here it is an inbound peer that happens to arrive through the
+       helper: we wait for its version, as with any inbound connection. */
+    CNode* pnode = CreateNode(hSocket, &GetNodeSignals(), GetNetworkAddressManager(), CAddress(helper), "", NodeConnectionFlags::INBOUND_CONN);
+    if (pnode) pnode->fRelayed = true;
+    LogPrint("net", "relay: inbound peer arrived through helper %s\n", helper.ToString());
+}
+
 bool CheckNodeIsAcceptingConnections(CAddress addrToConnectTo)
 {
     NodeRef pnode = ConnectNode(addrToConnectTo, NULL);
@@ -1163,12 +1250,6 @@ void ThreadOpenConnections()
             if (IsLimited(addr))
                 continue;
 
-            /* Relayed addresses are carried and gossiped (Part A of the
-               peer-relay spec) but connecting through a helper is Part B:
-               until it lands, they are not dialled. */
-            if (addr.IsRelay())
-                continue;
-
             // only consider very recently tried nodes after 30 failed attempts
             if (nANow - addr.nLastTry < 600 && nTries < 30)
                 continue;
@@ -1474,6 +1555,8 @@ void StartNode(const Settings& settings, CCriticalSection& mainCriticalSection, 
 
     // Dump network addresses
     threadGroup.create_thread(boost::bind(&LoopForever<void (*)()>, "dumpaddr", &DumpAddresses, DUMP_ADDRESSES_INTERVAL * 1000));
+    // Peer relay: once a minute, keep helpers registered and announce.
+    threadGroup.create_thread(boost::bind(&LoopForever<void (*)()>, "relay", &PeerRelay::ClientMaintenance, 60 * 1000));
 }
 
 bool StopNode()

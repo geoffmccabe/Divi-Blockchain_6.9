@@ -16,6 +16,9 @@
 #include <I_PeerBlockNotifyService.h>
 
 #include <deque>
+#include <functional>
+#include <vector>
+#include <NodeId.h>
 #include <stdint.h>
 
 #ifndef WIN32
@@ -69,6 +72,16 @@ void DeterministicallyRelayAddressToLimitedPeers(const CAddress& addr,int number
 std::vector<std::string> BanOutdatedPeers();
 bool BanSpecificPeer(const CNetAddr& address);
 int GetPeerCount();
+int GetInboundPeerCount();
+int GetOutboundPeerCount();
+/** Run `fn` for every connected node, under the nodes lock. */
+void ForEachNode(const std::function<void(CNode*)>& fn);
+/** Run `fn` on the node with this id if it is still connected. */
+bool WithNodeById(NodeId id, const std::function<void(CNode*)>& fn);
+/** HOME node: a helper said someone is calling; open a fresh connection to
+ *  the helper, answer with the token, and treat the result as an inbound
+ *  peer. Blocks; run on its own thread. */
+void AcceptRelayedConnection(CService helper, std::vector<unsigned char> token);
 void SchedulePingingPeers();
 enum NodeConnectionStatus
 {

@@ -15,6 +15,8 @@ public:
     int nVersion;
     std::string cleanSubVer;
     bool fInbound;
+    bool fRelayed;
+    bool fRelayPipe;
     int nStartingHeight;
     uint64_t nSendBytes;
     uint64_t nRecvBytes;

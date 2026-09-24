@@ -76,6 +76,10 @@ enum {
 	// that the node doens't want to receive master nodes messages. (the 1<<3 was not picked as constant because on bitcoin 0.14 is witness and we want that update here )
 
 	 NODE_BLOOM_WITHOUT_MN = (1 << 4),
+    /** NODE_RELAY_HELPER: this node offers to relay for home nodes that
+     *  cannot be reached (docs/PEER-RELAY-SPEC.md, B2). Carried in the
+     *  address gossip, so a home node can find helpers in its book. */
+    NODE_RELAY_HELPER = (1 << 5),
 
     // Bits 24-31 are reserved for temporary experiments. Just pick a bit that
     // isn't getting used, or one not being used much, and notify the

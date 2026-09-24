@@ -12,7 +12,22 @@ language on purpose; the protocol detail is in the tables.
   node and kept them across a restart; an old 69.0.4 node connected
   throughout, received only plain addresses, and was never banned. 402 of
   402 unit tests pass. Relayed addresses are never dialled until Part B.
-- Part B: not started.
+- 2026-Sep-24, later: **Part B built and proven** on a private chain
+  (`divi/contrib/relay-regtest.sh`): a home node with listening OFF
+  registered with a helper, announced `relay:<key>@<helper>`, a third node
+  dialled it through the helper, both completed the Divi handshake, pings
+  ran at 0.5 ms, and blocks mined on the home node reached the caller over
+  the pipe. 402 of 402 unit tests pass. Wire names fit the 12-character
+  limit: rlyregister, rlyaccept, rlyrefuse, rlyconnect, rlyok, rlyerror,
+  rlyincoming, rlyanswer. Differences from the draft: no separate heartbeat
+  (a registration lives with the home node's ordinary connection to the
+  helper, whose pings are the heartbeat); the registration is signed, the
+  gossip entry is not (a fake entry fails at the helper); "am I a home
+  node" is a heuristic for now (no inbound peer 3 minutes after start with
+  at least two outbound), the connect-back check is a later refinement; the
+  per-connection bandwidth cap is not yet enforced; B4 encryption not done.
+  Two regtest-only flags for the test: -relaytestforcehome,
+  -relaytestlocalhelpers.
 
 ## Why
 

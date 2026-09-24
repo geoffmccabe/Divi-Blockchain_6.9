@@ -685,6 +685,10 @@ static void SetExtHash(unsigned char* ip, const std::vector<unsigned char>& byte
     memcpy(ip, h.begin(), 16);
 }
 
+static bool g_relayAllowLocalHelpers = false;
+void SetRelayAllowLocalHelpers(bool allow) { g_relayAllowLocalHelpers = allow; }
+bool RelayAllowLocalHelpers() { return g_relayAllowLocalHelpers; }
+
 bool CNetAddr::SetRelay(const std::vector<unsigned char>& key, const CService& helper)
 {
     if (key.size() != RELAY_KEY_SIZE) return false;
@@ -978,7 +982,8 @@ bool CNetAddr::IsValid() const
        with a port and its key has the right size. */
     if (IsRelay()) {
         CService helper = RelayHelper();
-        return RelayKey().size() == RELAY_KEY_SIZE && helper.IsValid() && helper.IsRoutable() && helper.GetPort() != 0;
+        const bool helperOk = helper.IsRoutable() || (g_relayAllowLocalHelpers && helper.IsLocal());
+        return RelayKey().size() == RELAY_KEY_SIZE && helper.IsValid() && helperOk && helper.GetPort() != 0;
     }
     // Cleanup 3-byte shifted addresses caused by garbage in size field
     // of addr messages from versions before 0.2.9 checksum.

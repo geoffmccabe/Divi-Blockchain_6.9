@@ -124,6 +124,11 @@ private:
 
     int nRecvVersion;
     bool fDisconnect;
+    /** ---- THE PIPE (docs/PEER-RELAY-SPEC.md, B3 step 4) ----
+     *  When a helper has joined a caller to a relayed node, bytes read on
+     *  this connection go straight into the other one's send queue and are
+     *  never parsed here. Closing either side closes the other. */
+    QueuedMessageConnection* pipeTarget_;
 
     // TODO: Document the postcondition of this function.  Is cs_vSend locked?
     void BeginMessage(const char* pszCommand) EXCLUSIVE_LOCK_FUNCTION(cs_vSend);
@@ -176,6 +181,12 @@ public:
     bool IsFlaggedForDisconnection() const;
     void FlagForDisconnection();
     std::deque<CNetMessage>& GetReceivedMessageQueue();
+    /** Join this connection to `other`: what arrives here is sent there.
+     *  Call on both sides to make a two-way pipe. */
+    void SetPipeTarget(QueuedMessageConnection* other);
+    bool IsPiped() const { return pipeTarget_ != nullptr; }
+    /** Queue raw bytes to send, as they are. Only the pipe uses this. */
+    void PushRawBytes(const char* data, size_t len);
 };
 
 enum NodeConnectionFlags
@@ -275,6 +286,16 @@ public:
     std::vector<CAddress> vAddrToSend;
     mruset<CAddress> setAddrKnown;
     bool fGetAddr;
+    /** ---- RELAY ----
+     *  fRelayPipe: this node is one end of a helper's pipe and carries no
+     *  messages of its own. relayPartner: the other end's id.
+     *  fRelayed: this connection reached us, or we reached it, through a
+     *  helper (for the peer list and the limits). */
+    bool fRelayPipe;
+    NodeId relayPartner;
+    bool fRelayed;
+    void SpliceWith(CNode* other);
+    QueuedMessageConnection& Connection() { return messageConnection_; }
     /** The peer said "sendaddrv2": it understands the addrv2 form, so it
      *  can be told about every kind of address, relayed ones included. */
     bool fWantsAddrV2;

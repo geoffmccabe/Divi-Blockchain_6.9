@@ -210,6 +210,7 @@ QueuedMessageConnection::QueuedMessageConnection(
     , nSendOffset(0)
     , nRecvVersion(INIT_PROTO_VERSION)
     , fDisconnect(false)
+    , pipeTarget_(nullptr)
 {
 }
 
@@ -287,8 +288,12 @@ void QueuedMessageConnection::ReceiveData(boost::condition_variable& messageHand
     char pchBuf[0x10000];
     int nBytes = channel_.receiveData(&pchBuf[0], sizeof(pchBuf));
     if (nBytes > 0) {
-        if (!ConvertDataBufferToNetworkMessage(pchBuf, nBytes,messageHandlerCondition))
+        if (pipeTarget_) {
+            /* A pipe: forwarded as-is, never parsed here. */
+            pipeTarget_->PushRawBytes(pchBuf, nBytes);
+        } else if (!ConvertDataBufferToNetworkMessage(pchBuf, nBytes,messageHandlerCondition)) {
             CloseCommsAndDisconnect();
+        }
         dataLogger_.RecordReceivedBytes(nBytes);
     } else if (nBytes == 0) {
         // socket closed gracefully
@@ -319,8 +324,29 @@ bool QueuedMessageConnection::TryReceiveData(boost::condition_variable& messageH
     return true;
 }
 
+void QueuedMessageConnection::SetPipeTarget(QueuedMessageConnection* other)
+{
+    pipeTarget_ = other;
+}
+
+void QueuedMessageConnection::PushRawBytes(const char* data, size_t len)
+{
+    LOCK(cs_vSend);
+    std::deque<CSerializeData>::iterator it = vSendMsg.insert(vSendMsg.end(), CSerializeData(data, data + len));
+    nSendSize += len;
+    if (it == vSendMsg.begin())
+        SendData();
+}
+
 void QueuedMessageConnection::CloseCommsAndDisconnect()
 {
+    /* One end of a pipe going means the other goes too. */
+    if (pipeTarget_) {
+        QueuedMessageConnection* other = pipeTarget_;
+        pipeTarget_ = nullptr;
+        other->pipeTarget_ = nullptr;      // never a dangling pointer back at us
+        if (!other->fDisconnect) other->FlagForDisconnection();
+    }
     fDisconnect = true;
     if (channel_.isValid()) {
         LogPrint("net", "disconnecting peer\n");
@@ -562,6 +588,9 @@ CNode::CNode(
     , vAddrToSend()
     , setAddrKnown(5000)
     , fGetAddr(false)
+    , fRelayPipe(false)
+    , relayPartner(-1)
+    , fRelayed(false)
     , fWantsAddrV2(false)
     
     , setInventoryKnown(MaxSendBufferSize() / 1000)
@@ -1107,4 +1136,14 @@ uint64_t NetworkUsageStats::GetTotalBytesSent()
 {
     LOCK(cs_totalBytesSent);
     return nTotalBytesSent;
+}
+
+void CNode::SpliceWith(CNode* other)
+{
+    fRelayPipe = true;
+    other->fRelayPipe = true;
+    relayPartner = other->GetId();
+    other->relayPartner = GetId();
+    messageConnection_.SetPipeTarget(&other->messageConnection_);
+    other->messageConnection_.SetPipeTarget(&messageConnection_);
 }
