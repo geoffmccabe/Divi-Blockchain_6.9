@@ -28,6 +28,11 @@ language on purpose; the protocol detail is in the tables.
   per-connection bandwidth cap is not yet enforced; B4 encryption not done.
   Two regtest-only flags for the test: -relaytestforcehome,
   -relaytestlocalhelpers.
+- 2026-Sep-24, night: **released as node 69.0.5** (scan.divi.love, pinned
+  in DD69 69.13.31). First live proof: the UK scanner box, whose port is
+  closed by its hosting firewall, registered with the Europe box as its
+  helper within minutes of upgrading, unprompted, and now announces
+  `relay:<key>@13.140.182.132:51472`.
 
 ## Why
 
