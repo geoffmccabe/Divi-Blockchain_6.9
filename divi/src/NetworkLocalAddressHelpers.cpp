@@ -177,6 +177,22 @@ bool IsReachable(const CNetAddr& addr)
 }
 
 // find 'best' local address for a particular peer
+/* The best-scored local address whether or not we are listening: a home
+   node that turned listening off still has an address peers see it from,
+   and that is what its relayed announcement should carry. */
+bool GetLocalAny(CService& addr)
+{
+    int nBestScore = -1;
+    LOCK(cs_mapLocalHost);
+    for (std::map<CNetAddr, LocalServiceInfo>::iterator it = mapLocalHost.begin(); it != mapLocalHost.end(); it++) {
+        if ((*it).second.nScore > nBestScore) {
+            addr = CService((*it).first, (*it).second.nPort);
+            nBestScore = (*it).second.nScore;
+        }
+    }
+    return nBestScore >= 0;
+}
+
 bool GetLocal(CService& addr, const CNetAddr* paddrPeer)
 {
     if (!IsListening())

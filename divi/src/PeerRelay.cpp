@@ -188,11 +188,15 @@ std::vector<CAddress> LocalRelayedAddresses()
     std::vector<CAddress> out;
     std::vector<unsigned char> key = GetNodeKeyBytes();
     if (key.empty()) return out;
+    /* Our own address, as peers reported it, so a map can place us. Only a
+       routable one: nothing is gained by announcing a private address. */
+    CService self;
+    const bool haveSelf = GetLocalAny(self) && self.IsRoutable() && !self.IsRelay();
     LOCK(cs_relay);
     for (const auto& h : g_helpers) {
         if (!h.second.accepted) continue;
         CNetAddr r;
-        if (!r.SetRelay(key, h.second.helperAddr)) continue;
+        if (!r.SetRelay(key, h.second.helperAddr, haveSelf ? &self : NULL)) continue;
         CAddress a(CService(r, h.second.helperAddr.GetPort()), GetLocalServices());
         a.nTime = GetAdjustedTime();
         out.push_back(a);

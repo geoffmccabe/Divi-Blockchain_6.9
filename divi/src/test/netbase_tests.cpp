@@ -177,6 +177,18 @@ BOOST_AUTO_TEST_CASE(relay_address_forms)
     CNetAddr back;
     BOOST_CHECK(back.SetSpecial(text));
     BOOST_CHECK(back == r);
+    /* With the node's own address included, for placing it on a map. */
+    CNetAddr withHome;
+    CNetAddr realHome("151.101.1.69");
+    BOOST_CHECK(withHome.SetRelay(TestKey(0x11), helper, &realHome));
+    BOOST_CHECK(withHome.RelayHome() == realHome);
+    BOOST_CHECK(withHome.RelayHelper() == helper);
+    BOOST_CHECK(withHome.ToString().find("/151.101.1.69") != std::string::npos);
+    CNetAddr backHome;
+    BOOST_CHECK(backHome.SetSpecial(withHome.ToString()));
+    BOOST_CHECK(backHome == withHome);
+    BOOST_CHECK(!r.RelayHome().IsValid());   // absent when not given
+    BOOST_CHECK(withHome != r);              // a different address from the same node without it
     /* Bad inputs are refused. */
     CNetAddr bad;
     BOOST_CHECK(!bad.SetRelay(std::vector<unsigned char>(10, 1), helper));           // key wrong size
@@ -239,6 +251,21 @@ BOOST_AUTO_TEST_CASE(relay_address_wire_forms)
         BOOST_CHECK(back[1] == relayed);
         BOOST_CHECK(back[1].IsRelay());
         BOOST_CHECK(back[1].RelayHelper() == helper);
+    }
+    /* addrv2 with the home part survives the wire too. */
+    {
+        CNetAddr h("151.101.1.69"), r;
+        BOOST_CHECK(r.SetRelay(TestKey(0x44), helper, &h));
+        std::vector<CAddress> v{CAddress(CService(r, 51472))};
+        CDataStream ss(SER_NETWORK, PROTOCOL_VERSION);
+        CAddrV2List out(v);
+        ss << out;
+        std::vector<CAddress> back;
+        CAddrV2List in(back);
+        ss >> in;
+        BOOST_REQUIRE_EQUAL(back.size(), 1u);
+        BOOST_CHECK(back[0].RelayHome() == h);
+        BOOST_CHECK(back[0] == v[0]);
     }
     /* An unknown kind on the wire is skipped, not fatal. */
     {

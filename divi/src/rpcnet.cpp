@@ -209,6 +209,13 @@ Value getnodeaddresses(const Array& params, bool fHelp, CWallet* pwallet)
         o.push_back(Pair("address", a.ToStringIP()));
         o.push_back(Pair("port", (int)a.GetPort()));
         o.push_back(Pair("network", GetNetworkName(a.GetNetwork())));
+        if (a.IsRelay()) {
+            /* The parts a map needs: who helps, and where the node itself is. */
+            o.push_back(Pair("helper", a.RelayHelper().ToStringIPPort()));
+            CNetAddr home = a.RelayHome();
+            o.push_back(Pair("home", home.IsValid() ? home.ToStringIP() : ""));
+            o.push_back(Pair("nodekey", HexStr(a.RelayKey())));
+        }
         out.push_back(o);
     }
     return out;

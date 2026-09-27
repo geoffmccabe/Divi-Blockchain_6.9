@@ -99,12 +99,15 @@ public:
     bool SetSpecial(const std::string& strName); // for Tor and relayed addresses
     /** Make this a relayed address: node `key` reachable through `helper`
      *  (which must be a plain IPv4/IPv6 address with a port). */
-    bool SetRelay(const std::vector<unsigned char>& key, const CService& helper);
+    bool SetRelay(const std::vector<unsigned char>& key, const CService& helper, const CNetAddr* home = NULL);
     bool IsRelay() const;
     /** The relayed node's key, empty if this is not a relayed address. */
     std::vector<unsigned char> RelayKey() const;
     /** The helper a relayed node is reached through (invalid if not relayed). */
     CService RelayHelper() const;
+    /** The relayed node's own IP, if it chose to include one (for placing it
+     *  on a map; unreachable directly). Invalid when absent. */
+    CNetAddr RelayHome() const;
     bool IsIPv4() const;                         // IPv4 mapped address (::FFFF:0:0/96, 0.0.0.0/0)
     bool IsIPv6() const;                         // IPv6 address (not mapped IPv4, not Tor)
     bool IsRFC1918() const;                      // IPv4 private networks (10.0.0.0/8, 192.168.0.0/16, 172.16.0.0/12)

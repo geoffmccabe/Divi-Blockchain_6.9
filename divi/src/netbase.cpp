@@ -689,7 +689,11 @@ static bool g_relayAllowLocalHelpers = false;
 void SetRelayAllowLocalHelpers(bool allow) { g_relayAllowLocalHelpers = allow; }
 bool RelayAllowLocalHelpers() { return g_relayAllowLocalHelpers; }
 
-bool CNetAddr::SetRelay(const std::vector<unsigned char>& key, const CService& helper)
+/* Bytes: key(33) | helper kind(1) | helper addr(4|16) | helper port(2)
+   | optionally: home kind(1) | home addr(4|16). The home part is what a
+   map needs to place the node; it is the node's own address, which every
+   node already announces in the clear today, so it gives away nothing new. */
+bool CNetAddr::SetRelay(const std::vector<unsigned char>& key, const CService& helper, const CNetAddr* home)
 {
     if (key.size() != RELAY_KEY_SIZE) return false;
     if (helper.IsRelay() || helper.IsTor() || !helper.IsValid() || helper.GetPort() == 0) return false;
@@ -704,6 +708,15 @@ bool CNetAddr::SetRelay(const std::vector<unsigned char>& key, const CService& h
     unsigned short port = helper.GetPort();
     b.push_back((unsigned char)(port >> 8));
     b.push_back((unsigned char)(port & 0xff));
+    if (home && !home->IsRelay() && !home->IsTor() && home->IsValid()) {
+        if (home->IsIPv4()) {
+            b.push_back(ADDRV2_IPV4);
+            b.insert(b.end(), home->ip + 12, home->ip + 16);
+        } else {
+            b.push_back(ADDRV2_IPV6);
+            b.insert(b.end(), home->ip, home->ip + 16);
+        }
+    }
     m_ext = NET_RELAY;
     m_extBytes = b;
     SetExtHash(ip, b);
@@ -721,19 +734,44 @@ std::vector<unsigned char> CNetAddr::RelayKey() const
     return std::vector<unsigned char>(m_extBytes.begin(), m_extBytes.begin() + RELAY_KEY_SIZE);
 }
 
+/* Where the helper part ends, or 0 if the bytes are malformed. */
+static size_t RelayHelperEnd(const std::vector<unsigned char>& b)
+{
+    if (b.size() < RELAY_KEY_SIZE + 1 + 4 + 2) return 0;
+    size_t at = RELAY_KEY_SIZE;
+    unsigned char kind = b[at++];
+    size_t len = kind == ADDRV2_IPV4 ? 4 : (kind == ADDRV2_IPV6 ? 16 : 0);
+    if (len == 0 || b.size() < at + len + 2) return 0;
+    return at + len + 2;
+}
+
 CService CNetAddr::RelayHelper() const
 {
     CService out;
-    if (!IsRelay() || m_extBytes.size() < RELAY_KEY_SIZE + 1 + 4 + 2) return out;
+    if (!IsRelay()) return out;
+    size_t end = RelayHelperEnd(m_extBytes);
+    if (end == 0) return out;
     size_t at = RELAY_KEY_SIZE;
     unsigned char kind = m_extBytes[at++];
-    size_t len = kind == ADDRV2_IPV4 ? 4 : (kind == ADDRV2_IPV6 ? 16 : 0);
-    if (len == 0 || m_extBytes.size() != at + len + 2) return out;
+    size_t len = kind == ADDRV2_IPV4 ? 4 : 16;
     CNetAddr a;
     a.SetRaw(kind == ADDRV2_IPV4 ? NET_IPV4 : NET_IPV6, &m_extBytes[at]);
     at += len;
     unsigned short port = (unsigned short)((m_extBytes[at] << 8) | m_extBytes[at + 1]);
     return CService(a, port);
+}
+
+CNetAddr CNetAddr::RelayHome() const
+{
+    CNetAddr out;
+    if (!IsRelay()) return out;
+    size_t at = RelayHelperEnd(m_extBytes);
+    if (at == 0 || at >= m_extBytes.size()) return out;
+    unsigned char kind = m_extBytes[at++];
+    size_t len = kind == ADDRV2_IPV4 ? 4 : (kind == ADDRV2_IPV6 ? 16 : 0);
+    if (len == 0 || m_extBytes.size() != at + len) return out;
+    out.SetRaw(kind == ADDRV2_IPV4 ? NET_IPV4 : NET_IPV6, &m_extBytes[at]);
+    return out;
 }
 
 void CNetAddr::ToV2(unsigned char& id, std::vector<unsigned char>& bytes) const
@@ -778,8 +816,14 @@ void CNetAddr::SetFromV2(unsigned char id, const std::vector<unsigned char>& byt
         tmp.m_ext = NET_RELAY;
         tmp.m_extBytes = bytes;
         CService helper = tmp.RelayHelper();
+        CNetAddr home = tmp.RelayHome();
         std::vector<unsigned char> key(bytes.begin(), bytes.begin() + RELAY_KEY_SIZE);
-        SetRelay(key, helper);
+        /* Malformed trailing bytes (neither absent nor a valid home) are
+           refused: the sizes must agree exactly. */
+        size_t end = RelayHelperEnd(bytes);
+        if (end == 0) break;
+        if (end != bytes.size() && !home.IsValid()) break;
+        SetRelay(key, helper, home.IsValid() ? &home : NULL);
         break;
     }
     default:
@@ -816,9 +860,22 @@ bool CNetAddr::SetSpecial(const std::string& strName)
         std::string hex = strName.substr(6, at - 6);
         if (!IsHex(hex)) return false;
         std::vector<unsigned char> key = ParseHex(hex);
+        std::string rest = strName.substr(at + 1);
+        CNetAddr home;
+        bool haveHome = false;
+        /* "…@helper:port/home-ip": the home part is optional. An IPv6 helper
+           is written in brackets, so the split is on the LAST slash. */
+        size_t slash = rest.rfind('/');
+        if (slash != std::string::npos) {
+            std::vector<CNetAddr> v;
+            if (!LookupHost(rest.substr(slash + 1).c_str(), v, 1, false) || v.empty()) return false;
+            home = v[0];
+            haveHome = true;
+            rest = rest.substr(0, slash);
+        }
         CService helper;
-        if (!Lookup(strName.substr(at + 1).c_str(), helper, 0, false)) return false;
-        return SetRelay(key, helper);
+        if (!Lookup(rest.c_str(), helper, 0, false)) return false;
+        return SetRelay(key, helper, haveHome ? &home : NULL);
     }
     if (strName.size() > 6 && strName.substr(strName.size() - 6, 6) == ".onion") {
         std::vector<unsigned char> vchAddr = DecodeBase32(strName.substr(0, strName.size() - 6).c_str());
@@ -1043,8 +1100,11 @@ enum Network CNetAddr::GetNetwork() const
 
 std::string CNetAddr::ToStringIP() const
 {
-    if (IsRelay())
-        return "relay:" + HexStr(RelayKey()) + "@" + RelayHelper().ToStringIPPort();
+    if (IsRelay()) {
+        CNetAddr home = RelayHome();
+        return "relay:" + HexStr(RelayKey()) + "@" + RelayHelper().ToStringIPPort()
+            + (home.IsValid() ? "/" + home.ToStringIP() : "");
+    }
     if (IsTor())
         return EncodeBase32(&ip[6], 10) + ".onion";
     CService serv(*this, 0);

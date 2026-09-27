@@ -33,6 +33,12 @@ language on purpose; the protocol detail is in the tables.
   closed by its hosting firewall, registered with the Europe box as its
   helper within minutes of upgrading, unprompted, and now announces
   `relay:<key>@13.140.182.132:51472`.
+- 2026-Sep-27: **node 69.0.6 (-dd69.4)**: the relayed address may carry the
+  home node's own IP after a slash (`relay:<key>@helper:port/home-ip`),
+  which is what a map needs to place it; it is the address the node
+  already announces in the clear, so nothing new is given away. 69.0.5
+  nodes drop the longer form as unknown until they update. `getnodeaddresses`
+  reports `helper`, `home`, `nodekey` for relayed entries.
 
 ## Why
 

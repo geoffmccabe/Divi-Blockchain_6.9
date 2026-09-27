@@ -27,6 +27,7 @@ bool RemoveLocal(const CService& addr);
 bool SeenLocal(const CService& addr);
 bool IsLocal(const CService& addr);
 bool GetLocal(CService& addr, const CNetAddr* paddrPeer = NULL);
+bool GetLocalAny(CService& addr);
 bool IsReachable(enum Network net);
 bool IsReachable(const CNetAddr& addr);
 void SetReachable(enum Network net, bool fFlag = true);
