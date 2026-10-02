@@ -47,6 +47,12 @@ class thread_group;
 
 bool CheckNodeIsAcceptingConnections(CAddress addrToConnectTo);
 bool OpenNetworkConnection(const CAddress& addrConnect, const char* strDest = NULL, bool fOneShot = false);
+/** Addresses in our book that offer relay help (NODE_RELAY_HELPER), plus the
+ *  helper half of every relayed address we know. For a home node seeking a
+ *  helper on purpose rather than waiting to bump into one. */
+std::vector<CService> KnownHelperAddresses();
+/** Is there a connection to this address right now? */
+bool IsConnectedTo(const CService& addr);
 bool addNode(const std::string& strNode, const std::string& strCommand);
 std::vector<std::string> getAddedNodeList();
 

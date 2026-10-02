@@ -1381,6 +1381,28 @@ bool OpenNetworkConnection(const CAddress& addrConnect, const char* pszDest, boo
     return true;
 }
 
+std::vector<CService> KnownHelperAddresses()
+{
+    std::vector<CService> out;
+    std::set<std::string> seen;
+    for (const CAddress& a : addrman.GetAllAddr()) {
+        CService s;
+        if (a.IsRelay()) s = a.RelayHelper();
+        else if (a.nServices & NODE_RELAY_HELPER) s = a;
+        else continue;
+        if (s.IsRelay()) continue;
+        if (!s.IsRoutable() && !(RelayAllowLocalHelpers() && s.IsLocal())) continue;
+        if (seen.insert(s.ToString()).second) out.push_back(s);
+    }
+    return out;
+}
+
+bool IsConnectedTo(const CService& addr)
+{
+    /* By address AND port: another node on the same machine is another node. */
+    return FindNode(addr) != NULL;
+}
+
 bool BindListenPort(const CService& addrBind, string& strError, bool fWhitelisted)
 {
     strError = "";

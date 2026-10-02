@@ -16,6 +16,9 @@
 #include "utilstrencodings.h"
 #include "Settings.h"
 #include "timedata.h"
+#include "netbase.h"
+#include "protocol.h"
+#include "chainparams.h"
 
 #include <boost/thread.hpp>
 #include <map>
@@ -59,6 +62,12 @@ std::map<NodeId, HelperLink> g_helpers;
 int64_t g_startedAt = 0;
 int64_t g_lastAnnounce = 0;
 bool g_forceHome = false;
+/* Helpers we dialled or that refused us, and when they may be tried again. */
+std::map<std::string, int64_t> g_helperBackoff;
+/* A last resort when the book names no helper at all (a fresh node behind
+   NAT that has only ever met old-version peers): the Divi project's own
+   reachable node. Any helper learned from the network is preferred. */
+const char* const FALLBACK_HELPERS[] = { "13.140.182.132:51472" };
 
 std::vector<unsigned char> RandomToken()
 {
@@ -270,6 +279,7 @@ bool HandleMessage(CNode* pfrom, const std::string& command, CDataStream& vRecv)
             unsigned char reason = 0;
             vRecv >> reason;
             LogPrint("net", "relay: helper %s refused (%d)\n", h->second.helperAddr.ToString(), reason);
+            g_helperBackoff[h->second.helperAddr.ToString()] = GetTime() + 60 * 60;
             g_helpers.erase(h);
         }
         return true;
@@ -411,6 +421,43 @@ void ClientMaintenance()
             have++;
             LogPrint("net", "relay: asking %s to help\n", addr.ToString());
         });
+    }
+    /* ---- SEEK A HELPER, DO NOT WAIT FOR ONE ----
+       The loop above only asks peers we already have. A home node whose
+       random peers are all old-version nodes (every one the UK node had on
+       2026-Oct-01) therefore never found a helper, and once its helper
+       connection dropped it never came back: unreachable for days while
+       the helper sat idle. So, while short of helpers, dial one known
+       helper per tick (the book's NODE_RELAY_HELPER addresses and the
+       helper half of relayed addresses; the project's own node last),
+       skipping groups we already use and anything tried recently. The
+       next tick finds it among our peers and registers as usual. */
+    if (have < MAX_HELPERS) {
+        std::vector<CService> candidates = KnownHelperAddresses();
+        if (Params().NetworkID() == CBaseChainParams::MAIN) {
+            for (const char* f : FALLBACK_HELPERS) {
+                CService s;
+                if (Lookup(f, s, 0, false)) candidates.push_back(s);
+            }
+        }
+        std::set<std::vector<unsigned char>> groups;
+        for (const auto& h : g_helpers) groups.insert(h.second.helperAddr.GetGroup());
+        LogPrint("net", "relay: %u helper candidates known, %u helpers held\n", (unsigned)candidates.size(), have);
+        for (const CService& s : candidates) {
+            const std::string name = s.ToString();
+            auto b = g_helperBackoff.find(name);
+            if (b != g_helperBackoff.end() && b->second > now) continue;
+            if (groups.count(s.GetGroup())) continue;
+            if (IsConnectedTo(s)) continue;         // already a peer; the loop above handles it
+            g_helperBackoff[name] = now + 10 * 60;  // one try per ten minutes per helper
+            LogPrint("net", "relay: dialling helper %s\n", name);
+            /* Connecting blocks; this thread has nothing else to do. The lock
+               is released so message handling continues meanwhile. */
+            LEAVE_CRITICAL_SECTION(cs_relay);
+            const bool ok = OpenNetworkConnection(CAddress(s, NODE_RELAY_HELPER), NULL, false);
+            ENTER_CRITICAL_SECTION(cs_relay);
+            if (ok) break;                          // one at a time; see who answers
+        }
     }
     /* Re-announce every six hours (spec B1 step 4). */
     if (now - g_lastAnnounce > 6 * 60 * 60) AnnounceRelayedAddresses();
