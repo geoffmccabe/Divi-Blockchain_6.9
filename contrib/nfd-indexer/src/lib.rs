@@ -20,12 +20,17 @@ use dvxp_core::codec::Address;
 use dvxp_core::registry::{RecordContext, RecordHandler};
 use dvxp_core::varint::Cursor;
 use dvxp_core::{Ignored, Record, TYPE_NFD};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const SUB_MINT: u8 = 0x01;
 const SUB_TRANSFER: u8 = 0x02;
 const SUB_KEYANNOUNCE: u8 = 0x03;
 const SUB_COLLECTION: u8 = 0x04;
+/// COMMISSION-SET 0x09: collection_id(32) | amount_duffs(8, big-endian u64) |
+/// payout(21 packed). Signed by the collection creator; the amount can only be
+/// lowered (see docs/NFD-CREATOR-COMMISSION.md). Set on the collection; a
+/// transfer of a member is then valid only if it pays >= amount to payout.
+const SUB_COMMISSION: u8 = 0x09;
 const FLAG_HAS_THUMB: u8 = 0x02;
 const FLAG_IN_COLLECTION: u8 = 0x04;
 
@@ -58,6 +63,10 @@ pub struct Collection {
     pub max_supply: u32, // 0 = uncapped
     pub meta_ptr: [u8; 32],
     pub minted: u32,
+    /// Creator commission (amount_duffs, payout address). `None` until the
+    /// creator sets one. A transfer of a member must pay >= amount_duffs to
+    /// payout to be valid. The amount can only be lowered over time.
+    pub commission: Option<(u64, Addr21)>,
 }
 
 /// One reversible change, kept so a reorg can be undone exactly.
@@ -81,6 +90,9 @@ pub enum Undo {
     KeyAnnounced { addr: Addr21, previous: Option<[u8; 32]> },
     /// A collection was created. Remove it.
     CollectionCreated { id: [u8; 32] },
+    /// A collection's commission changed. Restore the amount/payout it replaced
+    /// (`None` means the collection had no commission before).
+    CommissionSet { id: [u8; 32], previous: Option<(u64, Addr21)> },
 }
 
 /// The NFD ownership ledger. Keyed by mint txid (the collectible's id).
@@ -116,6 +128,10 @@ impl NfdLedger {
     }
     pub fn collection_of(&self, id: &[u8; 32]) -> Option<&Collection> {
         self.collections.get(id)
+    }
+    /// The current creator commission (amount_duffs, payout) for a collection.
+    pub fn commission_of(&self, id: &[u8; 32]) -> Option<(u64, Addr21)> {
+        self.collections.get(id).and_then(|c| c.commission)
     }
     pub fn collection_count(&self) -> usize {
         self.collections.len()
@@ -172,6 +188,11 @@ impl NfdLedger {
                 },
                 Undo::CollectionCreated { id } => {
                     self.collections.remove(&id);
+                }
+                Undo::CommissionSet { id, previous } => {
+                    if let Some(col) = self.collections.get_mut(&id) {
+                        col.commission = previous;
+                    }
                 }
             }
         }
@@ -247,16 +268,32 @@ impl NfdLedger {
             return Err(Ignored::TrailingBytes);
         }
         let sender = Self::sender(ctx)?;
-        // Scoped so the mutable borrow ends before the undo log is touched.
-        let previous_owner = {
-            let nfd = self.nfds.get_mut(&mint_txid).ok_or(Ignored::RuleViolation("unknown nfd"))?;
+        // Read current owner + collection without holding a mutable borrow.
+        let (previous_owner, collection_id) = {
+            let nfd = self.nfds.get(&mint_txid).ok_or(Ignored::RuleViolation("unknown nfd"))?;
             if nfd.owner != sender {
                 return Err(Ignored::RuleViolation("sender is not the current owner"));
             }
-            let previous = nfd.owner;
-            nfd.owner = new_owner;
-            previous
+            (nfd.owner, nfd.collection_id)
         };
+        // Creator commission: if this item's collection carries one, the transfer
+        // transaction must pay at least that amount to the payout address, or the
+        // transfer is NOT valid and ownership does not move. This is what makes
+        // the commission uncircumventable (see docs/NFD-CREATOR-COMMISSION.md).
+        if let Some(cid) = collection_id {
+            if let Some((amount, payout)) = self.collections.get(&cid).and_then(|c| c.commission) {
+                if amount > 0 {
+                    let mut h = [0u8; 20];
+                    h.copy_from_slice(&payout[1..21]);
+                    let paid = ctx.payments.get(&(payout[0], h)).copied().unwrap_or(0);
+                    if paid < amount {
+                        return Err(Ignored::RuleViolation("creator commission not paid"));
+                    }
+                }
+            }
+        }
+        // Commission satisfied (or none owed): move ownership.
+        self.nfds.get_mut(&mint_txid).expect("nfd checked present above").owner = new_owner;
         self.undo.push(Undo::Transferred { mint_txid, previous_owner });
 
         let mut d = vec![SUB_TRANSFER];
@@ -293,12 +330,48 @@ impl NfdLedger {
             return Err(Ignored::RuleViolation("duplicate collection id for this tx"));
         }
         let creator = Self::sender(ctx)?;
-        self.collections.insert(ctx.txid, Collection { creator, max_supply, meta_ptr, minted: 0 });
+        self.collections.insert(ctx.txid, Collection { creator, max_supply, meta_ptr, minted: 0, commission: None });
         self.undo.push(Undo::CollectionCreated { id: ctx.txid });
 
         let mut d = vec![SUB_COLLECTION];
         d.extend_from_slice(&ctx.txid);
         d.extend_from_slice(&creator);
+        Ok(d)
+    }
+
+    fn apply_commission_set(&mut self, body: &[u8], ctx: &RecordContext) -> Result<Vec<u8>, Ignored> {
+        let mut c = Cursor::new(body);
+        let cid = read32(&mut c)?;
+        let amt = c.read_bytes(8).map_err(|_| Ignored::Malformed("amount"))?;
+        let mut amt8 = [0u8; 8];
+        amt8.copy_from_slice(amt);
+        let amount = u64::from_be_bytes(amt8);
+        let po = c.read_bytes(21).map_err(|_| Ignored::Malformed("payout"))?;
+        let mut payout: Addr21 = [0u8; 21];
+        payout.copy_from_slice(po);
+        if !c.is_empty() {
+            return Err(Ignored::TrailingBytes);
+        }
+        let sender = Self::sender(ctx)?;
+        let col = self.collections.get_mut(&cid).ok_or(Ignored::RuleViolation("unknown collection"))?;
+        // Only the collection's creator may set its commission.
+        if col.creator != sender {
+            return Err(Ignored::RuleViolation("only the collection creator may set its commission"));
+        }
+        // DOWN-ONLY: once set, the amount can only be lowered, never raised.
+        if let Some((current, _)) = col.commission {
+            if amount > current {
+                return Err(Ignored::RuleViolation("creator commission can only be lowered"));
+            }
+        }
+        let previous = col.commission;
+        col.commission = Some((amount, payout));
+        self.undo.push(Undo::CommissionSet { id: cid, previous });
+
+        let mut d = vec![SUB_COMMISSION];
+        d.extend_from_slice(&cid);
+        d.extend_from_slice(&amount.to_be_bytes());
+        d.extend_from_slice(&payout);
         Ok(d)
     }
 }
@@ -314,6 +387,7 @@ impl RecordHandler for NfdLedger {
             SUB_TRANSFER => self.apply_transfer(rec.body, ctx),
             SUB_KEYANNOUNCE => self.apply_key_announce(rec.body, ctx),
             SUB_COLLECTION => self.apply_collection_create(rec.body, ctx),
+            SUB_COMMISSION => self.apply_commission_set(rec.body, ctx),
             other => Err(Ignored::UnknownSubtype(other)),
         }
     }
@@ -339,7 +413,36 @@ mod tests {
         packed(&addr(b))
     }
     fn ctx(txid: u8, sender: Option<Address>) -> RecordContext {
-        RecordContext { height: 100, tx_index: 1, txid: [txid; 32], block_time: 0, sender }
+        RecordContext { height: 100, tx_index: 1, txid: [txid; 32], block_time: 0, sender, payments: BTreeMap::new() }
+    }
+    fn ctx_pay(txid: u8, sender: Option<Address>, payments: BTreeMap<(u8, [u8; 20]), u64>) -> RecordContext {
+        RecordContext { height: 100, tx_index: 1, txid: [txid; 32], block_time: 0, sender, payments }
+    }
+    fn collection_body(max_supply: u32) -> Vec<u8> {
+        let mut b = max_supply.to_be_bytes().to_vec();
+        b.extend_from_slice(&[0xee; 32]); // meta_ptr
+        b
+    }
+    fn mint_into_body(collection_id: [u8; 32]) -> Vec<u8> {
+        let mut b = vec![0xaa; 32]; // arweave_ptr
+        b.extend_from_slice(&[0xbb; 32]); // content_hash
+        b.push(FLAG_IN_COLLECTION); // flags: in-collection, no thumb
+        b.extend_from_slice(&collection_id);
+        b.extend_from_slice(&[0xdd; 32]); // traits_ptr
+        b
+    }
+    fn commission_body(collection_id: [u8; 32], amount: u64, payout: Addr21) -> Vec<u8> {
+        let mut b = collection_id.to_vec();
+        b.extend_from_slice(&amount.to_be_bytes());
+        b.extend_from_slice(&payout);
+        b
+    }
+    fn pay(addr21: Addr21, amount: u64) -> BTreeMap<(u8, [u8; 20]), u64> {
+        let mut h = [0u8; 20];
+        h.copy_from_slice(&addr21[1..21]);
+        let mut m = BTreeMap::new();
+        m.insert((addr21[0], h), amount);
+        m
     }
     fn mint_body(thumb: bool) -> Vec<u8> {
         let mut b = vec![0xaa; 32];
@@ -604,5 +707,69 @@ mod tests {
 
         assert!(!l.has_pending_undo(), "a skipped record must leave nothing to undo");
         assert_eq!(l.owner_of(&[1; 32]), Some(pk(7)));
+    }
+
+    #[test]
+    fn commission_set_is_creator_only_and_down_only() {
+        let mut l = NfdLedger::new();
+        let creator = addr(7);
+        let cid = [5u8; 32];
+        l.apply(&rec(SUB_COLLECTION, &collection_body(0)), &ctx(5, Some(creator))).unwrap(); // collection id = [5;32]
+        let payout = pk(9);
+        l.apply(&rec(SUB_COMMISSION, &commission_body(cid, 1000, payout)), &ctx(6, Some(creator))).unwrap();
+        assert_eq!(l.commission_of(&cid), Some((1000, payout)));
+        // lower: ok
+        l.apply(&rec(SUB_COMMISSION, &commission_body(cid, 400, payout)), &ctx(7, Some(creator))).unwrap();
+        assert_eq!(l.commission_of(&cid), Some((400, payout)));
+        // raise: refused
+        assert!(l.apply(&rec(SUB_COMMISSION, &commission_body(cid, 900, payout)), &ctx(8, Some(creator))).is_err());
+        assert_eq!(l.commission_of(&cid), Some((400, payout)));
+        // non-creator: refused
+        assert!(l.apply(&rec(SUB_COMMISSION, &commission_body(cid, 100, payout)), &ctx(9, Some(addr(3)))).is_err());
+        assert_eq!(l.commission_of(&cid), Some((400, payout)));
+    }
+
+    #[test]
+    fn transfer_requires_the_commission_to_be_paid() {
+        let mut l = NfdLedger::new();
+        let creator = addr(7);
+        let cid = [5u8; 32];
+        l.apply(&rec(SUB_COLLECTION, &collection_body(0)), &ctx(5, Some(creator))).unwrap();
+        let payout = pk(9);
+        l.apply(&rec(SUB_COMMISSION, &commission_body(cid, 500, payout)), &ctx(6, Some(creator))).unwrap();
+        // mint an item into the collection (owner = creator); mint id = [10;32]
+        l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx(10, Some(creator))).unwrap();
+        assert_eq!(l.owner_of(&[10; 32]), Some(pk(7)));
+        // transfer body: mint_txid([10;32]) | new_owner(pk(2)) | wrapkey(32)
+        let mut tbody = [10u8; 32].to_vec();
+        tbody.extend_from_slice(&pk(2));
+        tbody.extend_from_slice(&[0u8; 32]);
+        // no payment: refused, owner unchanged
+        assert!(l.apply(&rec(SUB_TRANSFER, &tbody), &ctx(11, Some(creator))).is_err());
+        assert_eq!(l.owner_of(&[10; 32]), Some(pk(7)));
+        // underpaid: refused
+        assert!(l.apply(&rec(SUB_TRANSFER, &tbody), &ctx_pay(11, Some(creator), pay(payout, 499))).is_err());
+        assert_eq!(l.owner_of(&[10; 32]), Some(pk(7)));
+        // paid in full to payout: ownership moves
+        l.apply(&rec(SUB_TRANSFER, &tbody), &ctx_pay(11, Some(creator), pay(payout, 500))).unwrap();
+        assert_eq!(l.owner_of(&[10; 32]), Some(pk(2)));
+    }
+
+    #[test]
+    fn commission_set_rolls_back() {
+        let mut l = NfdLedger::new();
+        let creator = addr(7);
+        let cid = [5u8; 32];
+        l.apply(&rec(SUB_COLLECTION, &collection_body(0)), &ctx(5, Some(creator))).unwrap();
+        let payout = pk(9);
+        l.apply(&rec(SUB_COMMISSION, &commission_body(cid, 1000, payout)), &ctx(6, Some(creator))).unwrap();
+        let undo1 = l.take_block_undo(); // CollectionCreated + CommissionSet{prev:None}
+        l.apply(&rec(SUB_COMMISSION, &commission_body(cid, 400, payout)), &ctx(7, Some(creator))).unwrap();
+        let undo2 = l.take_block_undo();
+        assert_eq!(l.commission_of(&cid), Some((400, payout)));
+        l.rollback_block(undo2);
+        assert_eq!(l.commission_of(&cid), Some((1000, payout)));
+        l.rollback_block(undo1);
+        assert_eq!(l.commission_of(&cid), None); // collection gone
     }
 }

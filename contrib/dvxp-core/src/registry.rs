@@ -8,6 +8,7 @@
 use crate::codec::Address;
 use crate::{classify, Halt, Ignored, Record};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 /// Where a record appeared and who authorised it. `sender` is the address that
 /// funds `vin[0]` (the spec's deterministic, no-SegWit sender rule) — `None`
@@ -20,6 +21,12 @@ pub struct RecordContext {
     pub txid: [u8; 32],
     pub block_time: i64,
     pub sender: Option<Address>,
+    /// Payment outputs of the anchoring transaction: packed address (kind byte +
+    /// 20-byte hash160) -> total duffs paid to it. Lets a handler require a
+    /// payment in the same transaction — used for NFD creator commissions (a
+    /// transfer is valid only if it pays the toll). DMT uses its own path, not
+    /// this. Empty when the host does not populate it.
+    pub payments: BTreeMap<(u8, [u8; 20]), u64>,
 }
 
 /// A protocol that owns one DVXP record type. The core guarantees the record is
@@ -142,7 +149,7 @@ mod tests {
     }
 
     fn ctx() -> RecordContext {
-        RecordContext { height: 10, tx_index: 0, txid: [0; 32], block_time: 0, sender: None }
+        RecordContext { height: 10, tx_index: 0, txid: [0; 32], block_time: 0, sender: None, payments: BTreeMap::new() }
     }
 
     fn rec(ty: u8, subtype: u8) -> Vec<u8> {

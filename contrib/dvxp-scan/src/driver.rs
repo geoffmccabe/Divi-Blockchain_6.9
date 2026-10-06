@@ -255,6 +255,7 @@ impl Overlay {
                 txid: tx.txid,
                 block_time: block.time,
                 sender: tx.sender,
+                payments: tx.payments.clone(),
             };
 
             match rec.record_type {
