@@ -140,6 +140,12 @@ pub struct NfdView {
     pub thumb_ptr: Option<[u8; 32]>,
     pub collection_id: Option<[u8; 32]>,
     pub mint_height: u64,
+    /// For a Perc (a member of a collection carrying a rarity config): true while
+    /// still a sealed pack (not yet revealed). Always false for a non-Perc NFD.
+    pub sealed: bool,
+    /// The revealed roll, once it has resolved: `(base_tier, ur_tier)`. `None`
+    /// while sealed (or for a non-Perc NFD). `ur_tier` is `Some` for ultra-rares.
+    pub revealed: Option<(u16, Option<u16>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -495,6 +501,11 @@ pub fn nfd(o: &Overlay, id: &[u8; 32]) -> Option<NfdView> {
         thumb_ptr: n.thumb_ptr,
         collection_id: n.collection_id,
         mint_height: n.mint_height,
+        // A pack is "sealed" when its collection carries a rarity config and the
+        // reveal has not yet resolved. Non-Perc NFDs never have a rarity config,
+        // so they are never sealed.
+        sealed: n.collection_id.map_or(false, |c| o.nfd.rarity_of(&c).is_some()) && n.revealed.is_none(),
+        revealed: n.revealed.map(|r| (r.base_tier, r.ur_tier)),
     })
 }
 
