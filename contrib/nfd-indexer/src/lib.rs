@@ -20,6 +20,7 @@ use dvxp_core::codec::Address;
 use dvxp_core::registry::{RecordContext, RecordHandler};
 use dvxp_core::varint::Cursor;
 use dvxp_core::{Ignored, Record, TYPE_NFD};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 
 const SUB_MINT: u8 = 0x01;
@@ -434,6 +435,57 @@ fn read32(c: &mut Cursor) -> Result<[u8; 32], Ignored> {
     Ok(a)
 }
 
+/// The outcome of resolving a reveal: a base tier (always) and, when the
+/// ultra-rare gate fires, a UR tier on its own ladder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RevealOutcome {
+    pub base_tier: u16,       // 1..=tier_count
+    pub ur_tier: Option<u16>, // Some(1..=ur_count) when ultra-rare
+}
+
+/// Resolve a reveal PROVABLY-FAIRLY from a deterministic `seed` (derived from a
+/// future block, so no one can grind it) and the collection's on-chain
+/// [`RarityConfig`]. Integer-only, so the wallet, every indexer and the explorer
+/// reach the identical result. The base tier is a 1/2-geometric (50 / 25 / 12.5
+/// …) capped at `tier_count`. The ultra-rare gate fires with probability
+/// `ur_basic_ppm`; when it does, a UR tier is drawn from a `ur_progressive_ppm`
+/// geometric, capped at `ur_count`. The base tier is kept either way.
+pub fn resolve_reveal(seed: &[u8; 32], cfg: &RarityConfig) -> RevealOutcome {
+    // Independent 32-bit draws: word(n) = first 4 bytes of SHA256(seed || n_le).
+    let word = |n: u32| -> u32 {
+        let mut h = Sha256::new();
+        h.update(seed);
+        h.update(n.to_le_bytes());
+        let d = h.finalize();
+        u32::from_le_bytes([d[0], d[1], d[2], d[3]])
+    };
+    // "Continue" with probability ppm/1_000_000. 64-bit so 100% (= 1_000_000,
+    // whose 2^32 threshold overflows a u32) is handled as always-continue.
+    let cont = |w: u32, ppm: u32| -> bool {
+        ppm >= 1_000_000 || (w as u64) < (((ppm as u64) << 32) / 1_000_000)
+    };
+
+    let tier_cap = cfg.tier_count.max(1);
+    let mut base: u16 = 1;
+    let mut i = 0u32;
+    while base < tier_cap && (word(i) & 0x8000_0000) != 0 {
+        base += 1;
+        i += 1;
+    }
+
+    let mut ur_tier = None;
+    if cfg.ur_count > 0 && cfg.ur_basic_ppm > 0 && cont(word(1_000), cfg.ur_basic_ppm) {
+        let mut ut: u16 = 1;
+        let mut j = 0u32;
+        while ut < cfg.ur_count && cont(word(2_000 + j), cfg.ur_progressive_ppm) {
+            ut += 1;
+            j += 1;
+        }
+        ur_tier = Some(ut);
+    }
+    RevealOutcome { base_tier: base, ur_tier }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,5 +880,57 @@ mod tests {
         let mut bad = collection_body(1);
         bad.extend_from_slice(&[0xaa; 5]);
         assert!(l.apply(&rec(SUB_COLLECTION, &bad), &ctx(3, Some(addr(7)))).is_err());
+    }
+
+    fn seed_of(k: u32) -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(b"test-seed");
+        h.update(k.to_le_bytes());
+        let d = h.finalize();
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&d);
+        s
+    }
+
+    #[test]
+    fn reveal_roll_is_deterministic_and_fair() {
+        let cfg = RarityConfig { tier_count: 40, ur_basic_ppm: 10_000, ur_progressive_ppm: 100_000, ur_count: 3 };
+        let s = [9u8; 32];
+        assert_eq!(resolve_reveal(&s, &cfg), resolve_reveal(&s, &cfg)); // deterministic
+
+        let n = 40_000u32;
+        let (mut t1, mut t2, mut ur) = (0u32, 0u32, 0u32);
+        for k in 0..n {
+            let o = resolve_reveal(&seed_of(k), &cfg);
+            assert!(o.base_tier >= 1 && o.base_tier <= 40);
+            if let Some(u) = o.ur_tier {
+                assert!(u >= 1 && u <= 3);
+            }
+            if o.base_tier == 1 {
+                t1 += 1;
+            }
+            if o.base_tier == 2 {
+                t2 += 1;
+            }
+            if o.ur_tier.is_some() {
+                ur += 1;
+            }
+        }
+        let (p1, p2, pur) = (t1 as f64 / n as f64, t2 as f64 / n as f64, ur as f64 / n as f64);
+        assert!((0.45..0.55).contains(&p1), "tier1 share {p1}");
+        assert!((0.20..0.30).contains(&p2), "tier2 share {p2}");
+        assert!((0.006..0.016).contains(&pur), "ur rate {pur}"); // ~1%
+    }
+
+    #[test]
+    fn reveal_respects_caps() {
+        // 100% gate + 100% progressive -> always UR, UR tier pinned at the cap.
+        let cfg = RarityConfig { tier_count: 3, ur_basic_ppm: 1_000_000, ur_progressive_ppm: 1_000_000, ur_count: 2 };
+        let o = resolve_reveal(&[7u8; 32], &cfg);
+        assert!(o.base_tier >= 1 && o.base_tier <= 3);
+        assert_eq!(o.ur_tier, Some(2));
+        // no UR configured -> never ultra-rare
+        let none = RarityConfig { tier_count: 5, ur_basic_ppm: 1_000_000, ur_progressive_ppm: 0, ur_count: 0 };
+        assert_eq!(resolve_reveal(&[1u8; 32], &none).ur_tier, None);
     }
 }

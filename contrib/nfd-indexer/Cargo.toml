@@ -7,6 +7,9 @@ license = "MIT"
 
 [dependencies]
 dvxp-core = { path = "../dvxp-core" }
+# Deterministic entropy stream for the provably-fair reveal roll (same audited
+# RustCrypto hash the overlay already uses; no new supply-chain surface).
+sha2 = "0.10"
 
 [lib]
 name = "nfd_indexer"
