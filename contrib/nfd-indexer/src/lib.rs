@@ -56,6 +56,17 @@ pub struct Nfd {
     pub mint_tx_index: u32,
 }
 
+/// On-chain rarity config for a blind-pack (Perc) collection, so a reveal/forge
+/// roll can be resolved by the protocol itself (the chain can't read Arweave).
+/// Ultra-rare chances are parts-per-million (e.g. 10_000 ppm = 1%).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RarityConfig {
+    pub tier_count: u16,
+    pub ur_basic_ppm: u32,
+    pub ur_progressive_ppm: u32,
+    pub ur_count: u16,
+}
+
 /// A collection: creator-owned, capped, with public metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Collection {
@@ -63,6 +74,9 @@ pub struct Collection {
     pub max_supply: u32, // 0 = uncapped
     pub meta_ptr: [u8; 32],
     pub minted: u32,
+    /// Rarity config for blind-pack collections (None = not a blind-pack set, or
+    /// a plain collection). Written into the COLLECTION-CREATE record at launch.
+    pub rarity: Option<RarityConfig>,
     /// Creator commission (amount_duffs, payout address). `None` until the
     /// creator sets one. A transfer of a member must pay >= amount_duffs to
     /// payout to be valid. The amount can only be lowered over time.
@@ -132,6 +146,10 @@ impl NfdLedger {
     /// The current creator commission (amount_duffs, payout) for a collection.
     pub fn commission_of(&self, id: &[u8; 32]) -> Option<(u64, Addr21)> {
         self.collections.get(id).and_then(|c| c.commission)
+    }
+    /// The on-chain rarity config for a collection, if it is a blind-pack set.
+    pub fn rarity_of(&self, id: &[u8; 32]) -> Option<RarityConfig> {
+        self.collections.get(id).and_then(|c| c.rarity)
     }
     pub fn collection_count(&self) -> usize {
         self.collections.len()
@@ -323,14 +341,30 @@ impl NfdLedger {
         let ms = c.read_bytes(4).map_err(|_| Ignored::Malformed("max_supply"))?;
         let max_supply = u32::from_be_bytes([ms[0], ms[1], ms[2], ms[3]]);
         let meta_ptr = read32(&mut c)?;
-        if !c.is_empty() {
-            return Err(Ignored::TrailingBytes);
-        }
+        // Optional trailing rarity config for a blind-pack collection. When
+        // present it is exactly 12 bytes: tier_count(2) ur_basic_ppm(4)
+        // ur_progressive_ppm(4) ur_count(2), all big-endian.
+        let rarity = if c.is_empty() {
+            None
+        } else {
+            let tc = c.read_bytes(2).map_err(|_| Ignored::Malformed("tier_count"))?;
+            let tier_count = u16::from_be_bytes([tc[0], tc[1]]);
+            let ub = c.read_bytes(4).map_err(|_| Ignored::Malformed("ur_basic_ppm"))?;
+            let ur_basic_ppm = u32::from_be_bytes([ub[0], ub[1], ub[2], ub[3]]);
+            let up = c.read_bytes(4).map_err(|_| Ignored::Malformed("ur_progressive_ppm"))?;
+            let ur_progressive_ppm = u32::from_be_bytes([up[0], up[1], up[2], up[3]]);
+            let uc = c.read_bytes(2).map_err(|_| Ignored::Malformed("ur_count"))?;
+            let ur_count = u16::from_be_bytes([uc[0], uc[1]]);
+            if !c.is_empty() {
+                return Err(Ignored::TrailingBytes);
+            }
+            Some(RarityConfig { tier_count, ur_basic_ppm, ur_progressive_ppm, ur_count })
+        };
         if self.collections.contains_key(&ctx.txid) {
             return Err(Ignored::RuleViolation("duplicate collection id for this tx"));
         }
         let creator = Self::sender(ctx)?;
-        self.collections.insert(ctx.txid, Collection { creator, max_supply, meta_ptr, minted: 0, commission: None });
+        self.collections.insert(ctx.txid, Collection { creator, max_supply, meta_ptr, minted: 0, commission: None, rarity });
         self.undo.push(Undo::CollectionCreated { id: ctx.txid });
 
         let mut d = vec![SUB_COLLECTION];
@@ -771,5 +805,28 @@ mod tests {
         assert_eq!(l.commission_of(&cid), Some((1000, payout)));
         l.rollback_block(undo1);
         assert_eq!(l.commission_of(&cid), None); // collection gone
+    }
+
+    #[test]
+    fn collection_rarity_config_roundtrips() {
+        let mut l = NfdLedger::new();
+        // plain collection, no rarity config
+        l.apply(&rec(SUB_COLLECTION, &collection_body(0)), &ctx(1, Some(addr(7)))).unwrap();
+        assert_eq!(l.rarity_of(&[1; 32]), None);
+        // blind-pack collection carrying the rarity config
+        let mut body = collection_body(100);
+        body.extend_from_slice(&40u16.to_be_bytes()); // tier_count
+        body.extend_from_slice(&10_000u32.to_be_bytes()); // ur_basic_ppm (1%)
+        body.extend_from_slice(&100_000u32.to_be_bytes()); // ur_progressive_ppm (10%)
+        body.extend_from_slice(&3u16.to_be_bytes()); // ur_count
+        l.apply(&rec(SUB_COLLECTION, &body), &ctx(2, Some(addr(7)))).unwrap();
+        assert_eq!(
+            l.rarity_of(&[2; 32]),
+            Some(RarityConfig { tier_count: 40, ur_basic_ppm: 10_000, ur_progressive_ppm: 100_000, ur_count: 3 })
+        );
+        // a trailing config of the wrong length is rejected (not silently kept)
+        let mut bad = collection_body(1);
+        bad.extend_from_slice(&[0xaa; 5]);
+        assert!(l.apply(&rec(SUB_COLLECTION, &bad), &ctx(3, Some(addr(7)))).is_err());
     }
 }
