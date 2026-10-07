@@ -171,6 +171,12 @@ impl NfdLedger {
     pub fn rarity_of(&self, id: &[u8; 32]) -> Option<RarityConfig> {
         self.collections.get(id).and_then(|c| c.rarity)
     }
+    /// True while a pack's reveal has been committed but not yet resolved (it is
+    /// waiting for its seed block). Any client can show "opening…" and refuse a
+    /// second reveal, so no one wastes a fee on a REVEAL the rules would reject.
+    pub fn reveal_pending(&self, id: &[u8; 32]) -> bool {
+        self.pending_set.contains(id)
+    }
     pub fn collection_count(&self) -> usize {
         self.collections.len()
     }
@@ -1083,6 +1089,7 @@ mod tests {
         // a sealed pack minted into the Perc collection (id = [10;32], owner = creator)
         l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx(10, Some(creator))).unwrap();
         assert_eq!(l.revealed_of(&[10; 32]), None); // sealed
+        assert!(!l.reveal_pending(&[10; 32])); // not pending until a reveal is committed
 
         // a standalone (non-Perc) item cannot be revealed
         l.apply(&rec(SUB_MINT, &mint_body(false)), &ctx(20, Some(creator))).unwrap();
@@ -1092,6 +1099,7 @@ mod tests {
         let reveal_body = [10u8; 32].to_vec();
         l.apply(&rec(SUB_REVEAL, &reveal_body), &ctx(11, Some(creator))).unwrap();
         assert_eq!(l.revealed_of(&[10; 32]), None);
+        assert!(l.reveal_pending(&[10; 32])); // committed but not resolved -> pending
         // non-owner can't reveal, and a second commit while pending is refused
         assert!(l.apply(&rec(SUB_REVEAL, &reveal_body), &ctx(12, Some(addr(3)))).is_err());
         assert!(l.apply(&rec(SUB_REVEAL, &reveal_body), &ctx(13, Some(creator))).is_err());
@@ -1105,11 +1113,13 @@ mod tests {
         assert!(!delta.is_empty());
         let out = l.revealed_of(&[10; 32]).expect("revealed");
         assert!(out.base_tier >= 1 && out.base_tier <= 40);
+        assert!(!l.reveal_pending(&[10; 32])); // resolved -> no longer pending
         let undo_resolve = l.take_block_undo();
 
         // reorg of the seed block: the resolution undoes, re-sealing + re-pending
         l.rollback_block(undo_resolve);
         assert_eq!(l.revealed_of(&[10; 32]), None);
+        assert!(l.reveal_pending(&[10; 32])); // reorg re-pends it
         // re-resolving with a different seed-block hash still resolves (and is
         // deterministic for that hash)
         assert!(!l.resolve_due(106, &[0x99; 32]).is_empty());
