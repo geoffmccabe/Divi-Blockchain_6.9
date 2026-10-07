@@ -311,6 +311,12 @@ impl Overlay {
             }
         }
 
+        // Deferred NFD reveals: resolve any whose future seed block is this one.
+        // Folded into this block's deltas + undo, so they are fingerprinted and
+        // reorg-safe like any other change (a reorg of the seed block re-rolls).
+        let reveal_delta = self.nfd.resolve_due(block.height, &block.hash);
+        nfd_deltas.extend_from_slice(&reveal_delta);
+
         // Close the block. DMT keeps its own chain for its own undo window; we
         // take its delta bytes and ignore its private fingerprint, because the
         // fingerprint we publish has to cover everything.

@@ -21,12 +21,18 @@ use dvxp_core::registry::{RecordContext, RecordHandler};
 use dvxp_core::varint::Cursor;
 use dvxp_core::{Ignored, Record, TYPE_NFD};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 const SUB_MINT: u8 = 0x01;
 const SUB_TRANSFER: u8 = 0x02;
 const SUB_KEYANNOUNCE: u8 = 0x03;
 const SUB_COLLECTION: u8 = 0x04;
+/// REVEAL 0x06: mint_txid(32). The owner commits to revealing a sealed Perc; the
+/// result is resolved from the hash of the block REVEAL_DELAY later, so it can't
+/// be ground. See resolve_due + resolve_reveal.
+const SUB_REVEAL: u8 = 0x06;
+/// Blocks between a reveal's commit and the block whose hash seeds its roll.
+const REVEAL_DELAY: u64 = 6;
 /// COMMISSION-SET 0x09: collection_id(32) | amount_duffs(8, big-endian u64) |
 /// payout(21 packed). Signed by the collection creator; the amount can only be
 /// lowered (see docs/NFD-CREATOR-COMMISSION.md). Set on the collection; a
@@ -55,6 +61,9 @@ pub struct Nfd {
     pub collection_id: Option<[u8; 32]>,
     pub mint_height: u64,
     pub mint_tx_index: u32,
+    /// For a Perc (a pack in a collection with a rarity config): `None` = still
+    /// sealed, `Some` = revealed to this tier. Non-Perc NFDs stay `None`.
+    pub revealed: Option<RevealOutcome>,
 }
 
 /// On-chain rarity config for a blind-pack (Perc) collection, so a reveal/forge
@@ -108,6 +117,11 @@ pub enum Undo {
     /// A collection's commission changed. Restore the amount/payout it replaced
     /// (`None` means the collection had no commission before).
     CommissionSet { id: [u8; 32], previous: Option<(u64, Addr21)> },
+    /// A reveal was committed (pending until its seed block). Drop it.
+    RevealCommitted { pack_id: [u8; 32], seed_height: u64 },
+    /// A pending reveal was resolved at its seed block. Clear the tier and put
+    /// it back on the pending list for that height.
+    RevealResolved { pack_id: [u8; 32], seed_height: u64 },
 }
 
 /// The NFD ownership ledger. Keyed by mint txid (the collectible's id).
@@ -116,6 +130,11 @@ pub struct NfdLedger {
     nfds: HashMap<[u8; 32], Nfd>,
     collections: HashMap<[u8; 32], Collection>, // collection id (create txid) -> collection
     keys: HashMap<Addr21, [u8; 32]>,            // address -> announced X25519 encryption pubkey
+    /// Reveals committed but not yet resolved, bucketed by the seed block height
+    /// at which they resolve. `pending_set` is the same packs, for O(1) "already
+    /// pending?" checks.
+    pending_reveals: HashMap<u64, Vec<[u8; 32]>>,
+    pending_set: HashSet<[u8; 32]>,
     /// Inverses of everything applied since the last [`NfdLedger::take_block_undo`].
     undo: Vec<Undo>,
 }
@@ -213,6 +232,16 @@ impl NfdLedger {
                         col.commission = previous;
                     }
                 }
+                Undo::RevealCommitted { pack_id, seed_height } => {
+                    self.drop_pending(&pack_id, seed_height);
+                }
+                Undo::RevealResolved { pack_id, seed_height } => {
+                    if let Some(nfd) = self.nfds.get_mut(&pack_id) {
+                        nfd.revealed = None;
+                    }
+                    self.pending_reveals.entry(seed_height).or_default().push(pack_id);
+                    self.pending_set.insert(pack_id);
+                }
             }
         }
     }
@@ -266,6 +295,7 @@ impl NfdLedger {
                 collection_id: collection_ref,
                 mint_height: ctx.height,
                 mint_tx_index: ctx.tx_index,
+                revealed: None,
             },
         );
         self.undo.push(Undo::Minted { mint_txid: ctx.txid, collection: collection_ref });
@@ -409,6 +439,105 @@ impl NfdLedger {
         d.extend_from_slice(&payout);
         Ok(d)
     }
+
+    /// Commit a reveal: the owner of a sealed Perc asks to reveal it. The result
+    /// is NOT decided here — it is resolved at a future block (REVEAL_DELAY
+    /// later) in [`resolve_due`], so the roll cannot be ground.
+    fn apply_reveal(&mut self, body: &[u8], ctx: &RecordContext) -> Result<Vec<u8>, Ignored> {
+        let mut c = Cursor::new(body);
+        let pack_id = read32(&mut c)?;
+        if !c.is_empty() {
+            return Err(Ignored::TrailingBytes);
+        }
+        let sender = Self::sender(ctx)?;
+        let (owner, already_revealed, coll) = {
+            let nfd = self.nfds.get(&pack_id).ok_or(Ignored::RuleViolation("unknown nfd"))?;
+            (nfd.owner, nfd.revealed.is_some(), nfd.collection_id)
+        };
+        if owner != sender {
+            return Err(Ignored::RuleViolation("only the owner may reveal it"));
+        }
+        if already_revealed {
+            return Err(Ignored::RuleViolation("already revealed"));
+        }
+        // Only a Perc (an item in a collection that carries a rarity config) can
+        // be revealed.
+        let is_perc = coll.and_then(|cid| self.collections.get(&cid)).and_then(|c| c.rarity).is_some();
+        if !is_perc {
+            return Err(Ignored::RuleViolation("not a revealable Perc"));
+        }
+        if self.pending_set.contains(&pack_id) {
+            return Err(Ignored::RuleViolation("reveal already pending"));
+        }
+        let seed_height = ctx.height + REVEAL_DELAY;
+        self.pending_reveals.entry(seed_height).or_default().push(pack_id);
+        self.pending_set.insert(pack_id);
+        self.undo.push(Undo::RevealCommitted { pack_id, seed_height });
+
+        let mut d = vec![SUB_REVEAL];
+        d.extend_from_slice(&pack_id);
+        d.extend_from_slice(&seed_height.to_be_bytes());
+        Ok(d)
+    }
+
+    /// Resolve every reveal whose seed block is `height`, using `block_hash` as
+    /// the seed. The driver calls this once per block (after records), folding
+    /// the returned delta into the block fingerprint; each resolution records an
+    /// undo so a reorg of the seed block re-rolls correctly.
+    pub fn resolve_due(&mut self, height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
+        let due = match self.pending_reveals.remove(&height) {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        let mut delta = Vec::new();
+        for pack_id in due {
+            self.pending_set.remove(&pack_id);
+            let cfg = self
+                .nfds
+                .get(&pack_id)
+                .and_then(|n| n.collection_id)
+                .and_then(|cid| self.collections.get(&cid))
+                .and_then(|c| c.rarity);
+            let Some(cfg) = cfg else { continue }; // collection/config gone (reorg edge): skip
+            // seed = SHA256(pack_id || seed_block_hash)
+            let mut h = Sha256::new();
+            h.update(pack_id);
+            h.update(block_hash);
+            let digest = h.finalize();
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&digest);
+            let outcome = resolve_reveal(&seed, &cfg);
+            if let Some(nfd) = self.nfds.get_mut(&pack_id) {
+                nfd.revealed = Some(outcome);
+            }
+            self.undo.push(Undo::RevealResolved { pack_id, seed_height: height });
+            delta.push(SUB_REVEAL);
+            delta.extend_from_slice(&pack_id);
+            delta.extend_from_slice(&outcome.base_tier.to_be_bytes());
+            delta.push(outcome.ur_tier.is_some() as u8);
+            if let Some(ut) = outcome.ur_tier {
+                delta.extend_from_slice(&ut.to_be_bytes());
+            }
+        }
+        delta
+    }
+
+    fn drop_pending(&mut self, pack_id: &[u8; 32], seed_height: u64) {
+        if let Some(v) = self.pending_reveals.get_mut(&seed_height) {
+            if let Some(pos) = v.iter().position(|p| p == pack_id) {
+                v.remove(pos);
+            }
+            if v.is_empty() {
+                self.pending_reveals.remove(&seed_height);
+            }
+        }
+        self.pending_set.remove(pack_id);
+    }
+
+    /// The revealed tier of a Perc, if it has been revealed.
+    pub fn revealed_of(&self, id: &[u8; 32]) -> Option<RevealOutcome> {
+        self.nfds.get(id).and_then(|n| n.revealed)
+    }
 }
 
 impl RecordHandler for NfdLedger {
@@ -423,6 +552,7 @@ impl RecordHandler for NfdLedger {
             SUB_KEYANNOUNCE => self.apply_key_announce(rec.body, ctx),
             SUB_COLLECTION => self.apply_collection_create(rec.body, ctx),
             SUB_COMMISSION => self.apply_commission_set(rec.body, ctx),
+            SUB_REVEAL => self.apply_reveal(rec.body, ctx),
             other => Err(Ignored::UnknownSubtype(other)),
         }
     }
@@ -932,5 +1062,56 @@ mod tests {
         // no UR configured -> never ultra-rare
         let none = RarityConfig { tier_count: 5, ur_basic_ppm: 1_000_000, ur_progressive_ppm: 0, ur_count: 0 };
         assert_eq!(resolve_reveal(&[1u8; 32], &none).ur_tier, None);
+    }
+
+    fn perc_collection_body() -> Vec<u8> {
+        let mut b = collection_body(0);
+        b.extend_from_slice(&40u16.to_be_bytes());
+        b.extend_from_slice(&10_000u32.to_be_bytes());
+        b.extend_from_slice(&100_000u32.to_be_bytes());
+        b.extend_from_slice(&3u16.to_be_bytes());
+        b
+    }
+
+    #[test]
+    fn reveal_commits_resolves_at_seed_block_and_rolls_back() {
+        let mut l = NfdLedger::new();
+        let creator = addr(7);
+        let cid = [5u8; 32];
+        l.apply(&rec(SUB_COLLECTION, &perc_collection_body()), &ctx(5, Some(creator))).unwrap();
+        // a sealed pack minted into the Perc collection (id = [10;32], owner = creator)
+        l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx(10, Some(creator))).unwrap();
+        assert_eq!(l.revealed_of(&[10; 32]), None); // sealed
+
+        // a standalone (non-Perc) item cannot be revealed
+        l.apply(&rec(SUB_MINT, &mint_body(false)), &ctx(20, Some(creator))).unwrap();
+        assert!(l.apply(&rec(SUB_REVEAL, &[20u8; 32].to_vec()), &ctx(21, Some(creator))).is_err());
+
+        // commit the reveal (ctx height is 100 -> seed height 106); stays sealed
+        let reveal_body = [10u8; 32].to_vec();
+        l.apply(&rec(SUB_REVEAL, &reveal_body), &ctx(11, Some(creator))).unwrap();
+        assert_eq!(l.revealed_of(&[10; 32]), None);
+        // non-owner can't reveal, and a second commit while pending is refused
+        assert!(l.apply(&rec(SUB_REVEAL, &reveal_body), &ctx(12, Some(addr(3)))).is_err());
+        assert!(l.apply(&rec(SUB_REVEAL, &reveal_body), &ctx(13, Some(creator))).is_err());
+
+        let _ = l.take_block_undo(); // clear prior undo so we capture only the resolution
+        // nothing resolves before the seed block
+        assert!(l.resolve_due(105, &[0x42; 32]).is_empty());
+        assert_eq!(l.revealed_of(&[10; 32]), None);
+        // the seed block resolves it
+        let delta = l.resolve_due(106, &[0x42; 32]);
+        assert!(!delta.is_empty());
+        let out = l.revealed_of(&[10; 32]).expect("revealed");
+        assert!(out.base_tier >= 1 && out.base_tier <= 40);
+        let undo_resolve = l.take_block_undo();
+
+        // reorg of the seed block: the resolution undoes, re-sealing + re-pending
+        l.rollback_block(undo_resolve);
+        assert_eq!(l.revealed_of(&[10; 32]), None);
+        // re-resolving with a different seed-block hash still resolves (and is
+        // deterministic for that hash)
+        assert!(!l.resolve_due(106, &[0x99; 32]).is_empty());
+        assert!(l.revealed_of(&[10; 32]).is_some());
     }
 }
