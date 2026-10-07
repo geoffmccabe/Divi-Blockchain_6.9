@@ -21,7 +21,7 @@ use dvxp_core::registry::{RecordContext, RecordHandler};
 use dvxp_core::varint::Cursor;
 use dvxp_core::{Ignored, Record, TYPE_NFD};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 const SUB_MINT: u8 = 0x01;
 const SUB_TRANSFER: u8 = 0x02;
@@ -621,6 +621,7 @@ mod tests {
     use super::*;
     use dvxp_core::registry::{Outcome, Registry};
     use dvxp_core::MAGIC;
+    use std::collections::BTreeMap;
 
     fn addr(b: u8) -> Address {
         Address { kind: 0, hash160: [b; 20] }
