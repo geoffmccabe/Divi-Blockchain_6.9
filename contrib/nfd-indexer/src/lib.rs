@@ -15,6 +15,7 @@
 //!   TRANSFER 0x02: mint_txid(32) | new_owner(21) | wrapkey_ptr(32)
 //!   KEY-ANNOUNCE 0x03: enc_pubkey(32)
 //!   COLLECTION-CREATE 0x04: max_supply(4, big-endian u32) | meta_ptr(32)
+//!   FORGE 0x05: input_a(32) | input_b(32) | collection_id(32)
 
 use dvxp_core::codec::Address;
 use dvxp_core::registry::{RecordContext, RecordHandler};
@@ -33,6 +34,20 @@ const SUB_COLLECTION: u8 = 0x04;
 const SUB_REVEAL: u8 = 0x06;
 /// Blocks between a reveal's commit and the block whose hash seeds its roll.
 const REVEAL_DELAY: u64 = 6;
+/// FORGE 0x05: input_a(32) | input_b(32) | collection_id(32). Signed by the
+/// forger (the funding sender), who must own both inputs. Both inputs must be
+/// REVEALED to the SAME tier, in the named Perc collection. The forge BURNS both
+/// inputs and creates ONE new sealed result pack, keyed by the forge txid, owned
+/// by the forger. Its tier is NOT decided here: like a reveal it resolves from a
+/// FUTURE block's hash (FORGE_DELAY later) as input_tier + K, where K is the
+/// halving bump (+1 @ 50%, +2 @ 25%, ...), so the guaranteed minimum is
+/// input_tier + 1 and the outcome cannot be ground. See apply_forge + resolve_due.
+const SUB_FORGE: u8 = 0x05;
+/// Blocks between a forge's commit and the block whose hash seeds its roll.
+const FORGE_DELAY: u64 = 6;
+/// Largest tier bump a forge can grant (the result tier may still exceed the
+/// collection's tier_count; art caps but the number keeps climbing).
+const FORGE_MAX_BUMP: u16 = 40;
 /// COMMISSION-SET 0x09: collection_id(32) | amount_duffs(8, big-endian u64) |
 /// payout(21 packed). Signed by the collection creator; the amount can only be
 /// lowered (see docs/NFD-CREATOR-COMMISSION.md). Set on the collection; a
@@ -122,6 +137,21 @@ pub enum Undo {
     /// A pending reveal was resolved at its seed block. Clear the tier and put
     /// it back on the pending list for that height.
     RevealResolved { pack_id: [u8; 32], seed_height: u64 },
+    /// A forge was committed: a result pack was created (pending until its seed
+    /// block) and two inputs were burned. Undo removes the result, restores the
+    /// burned inputs exactly as they were, and drops the pending forge entry.
+    Forged { result_id: [u8; 32], seed_height: u64, restored_inputs: Vec<([u8; 32], Nfd)> },
+    /// A pending forge was resolved at its seed block. Clear the result's tier
+    /// and put it back on the pending forge list for that height.
+    ForgeResolved { result_id: [u8; 32], seed_height: u64, input_tier: u16 },
+}
+
+/// A forge result awaiting its seed block: the new pack's id plus the shared
+/// input tier the halving bump is added to when it resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ForgePending {
+    result_id: [u8; 32],
+    input_tier: u16,
 }
 
 /// The NFD ownership ledger. Keyed by mint txid (the collectible's id).
@@ -135,6 +165,12 @@ pub struct NfdLedger {
     /// pending?" checks.
     pending_reveals: HashMap<u64, Vec<[u8; 32]>>,
     pending_set: HashSet<[u8; 32]>,
+    /// Forge results committed but not yet resolved, bucketed by the seed block
+    /// height at which they resolve, carrying the input tier the bump adds to.
+    /// `pending_forge_set` is the same result ids, for O(1) "mid-forge?" checks
+    /// (so the pack can't also be revealed through the normal reveal path).
+    pending_forges: HashMap<u64, Vec<ForgePending>>,
+    pending_forge_set: HashSet<[u8; 32]>,
     /// Inverses of everything applied since the last [`NfdLedger::take_block_undo`].
     undo: Vec<Undo>,
 }
@@ -176,6 +212,12 @@ impl NfdLedger {
     /// second reveal, so no one wastes a fee on a REVEAL the rules would reject.
     pub fn reveal_pending(&self, id: &[u8; 32]) -> bool {
         self.pending_set.contains(id)
+    }
+
+    /// Whether this pack is a forge result still awaiting its seed block (so it
+    /// is sealed, with a guaranteed minimum tier, but its tier is not yet rolled).
+    pub fn forge_pending(&self, id: &[u8; 32]) -> bool {
+        self.pending_forge_set.contains(id)
     }
     pub fn collection_count(&self) -> usize {
         self.collections.len()
@@ -247,6 +289,32 @@ impl NfdLedger {
                     }
                     self.pending_reveals.entry(seed_height).or_default().push(pack_id);
                     self.pending_set.insert(pack_id);
+                }
+                Undo::Forged { result_id, seed_height, restored_inputs } => {
+                    // Remove the result pack, drop its pending forge entry, and
+                    // put the two burned inputs back exactly as they were.
+                    self.nfds.remove(&result_id);
+                    if let Some(v) = self.pending_forges.get_mut(&seed_height) {
+                        if let Some(pos) = v.iter().position(|fp| fp.result_id == result_id) {
+                            v.remove(pos);
+                        }
+                        if v.is_empty() {
+                            self.pending_forges.remove(&seed_height);
+                        }
+                    }
+                    self.pending_forge_set.remove(&result_id);
+                    for (id, nfd) in restored_inputs {
+                        self.nfds.insert(id, nfd);
+                    }
+                }
+                Undo::ForgeResolved { result_id, seed_height, input_tier } => {
+                    // Un-roll: clear the result's tier and put it back on the
+                    // pending forge list for its seed height.
+                    if let Some(nfd) = self.nfds.get_mut(&result_id) {
+                        nfd.revealed = None;
+                    }
+                    self.pending_forges.entry(seed_height).or_default().push(ForgePending { result_id, input_tier });
+                    self.pending_forge_set.insert(result_id);
                 }
             }
         }
@@ -475,6 +543,10 @@ impl NfdLedger {
         if self.pending_set.contains(&pack_id) {
             return Err(Ignored::RuleViolation("reveal already pending"));
         }
+        if self.pending_forge_set.contains(&pack_id) {
+            // A forge result resolves by the forge roll, never the reveal roll.
+            return Err(Ignored::RuleViolation("pack is mid-forge, not revealable"));
+        }
         let seed_height = ctx.height + REVEAL_DELAY;
         self.pending_reveals.entry(seed_height).or_default().push(pack_id);
         self.pending_set.insert(pack_id);
@@ -486,17 +558,104 @@ impl NfdLedger {
         Ok(d)
     }
 
-    /// Resolve every reveal whose seed block is `height`, using `block_hash` as
-    /// the seed. The driver calls this once per block (after records), folding
-    /// the returned delta into the block fingerprint; each resolution records an
-    /// undo so a reorg of the seed block re-rolls correctly.
-    pub fn resolve_due(&mut self, height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
-        let due = match self.pending_reveals.remove(&height) {
-            Some(v) => v,
-            None => return Vec::new(),
+    /// Commit a forge: burn two revealed, same-tier packs the forger owns in a
+    /// Perc collection, and create ONE sealed result pack keyed by the forge
+    /// txid. The result tier is NOT decided here — like a reveal it resolves from
+    /// a future block (FORGE_DELAY later) in [`resolve_due`] as input_tier + the
+    /// halving bump, so the guaranteed minimum is input_tier + 1 and the roll
+    /// cannot be ground. Both inputs are consumed.
+    fn apply_forge(&mut self, body: &[u8], ctx: &RecordContext) -> Result<Vec<u8>, Ignored> {
+        let mut c = Cursor::new(body);
+        let input_a = read32(&mut c)?;
+        let input_b = read32(&mut c)?;
+        let collection_id = read32(&mut c)?;
+        if !c.is_empty() {
+            return Err(Ignored::TrailingBytes);
+        }
+        if input_a == input_b {
+            return Err(Ignored::RuleViolation("forge needs two different packs"));
+        }
+        // The result pack is keyed by the forge txid; refuse a collision.
+        if self.nfds.contains_key(&ctx.txid) || self.pending_forge_set.contains(&ctx.txid) {
+            return Err(Ignored::RuleViolation("duplicate forge id for this tx"));
+        }
+        let sender = Self::sender(ctx)?;
+        // Each input must exist, be owned by the forger, be in the named
+        // collection, and be revealed. Read their tiers without a mutable borrow.
+        let read_input = |me: &Self, id: &[u8; 32], which: &'static str| -> Result<u16, Ignored> {
+            let nfd = me.nfds.get(id).ok_or(Ignored::RuleViolation(match which {
+                "a" => "unknown input a",
+                _ => "unknown input b",
+            }))?;
+            if nfd.owner != sender {
+                return Err(Ignored::RuleViolation("forger does not own an input"));
+            }
+            if nfd.collection_id != Some(collection_id) {
+                return Err(Ignored::RuleViolation("an input is not in this collection"));
+            }
+            let outcome = nfd.revealed.ok_or(Ignored::RuleViolation("an input is not revealed"))?;
+            Ok(outcome.base_tier)
         };
+        let tier_a = read_input(self, &input_a, "a")?;
+        let tier_b = read_input(self, &input_b, "b")?;
+        if tier_a != tier_b {
+            return Err(Ignored::RuleViolation("inputs are not the same tier"));
+        }
+        // The collection must be a Perc set (carries a rarity config), mirroring reveal.
+        let is_perc = self.collections.get(&collection_id).and_then(|c| c.rarity).is_some();
+        if !is_perc {
+            return Err(Ignored::RuleViolation("not a Perc collection"));
+        }
+
+        // Burn the two inputs, remembering them exactly so a reorg can restore them.
+        let mut restored_inputs = Vec::with_capacity(2);
+        for id in [input_a, input_b] {
+            if let Some(nfd) = self.nfds.remove(&id) {
+                restored_inputs.push((id, nfd));
+            }
+        }
+        // Create the sealed result pack (id = forge txid), owned by the forger.
+        // It references the result tier's shared art off-chain (resolved via the
+        // tier-art registry), so it carries no per-item bundle: zeroed pointers.
+        self.nfds.insert(
+            ctx.txid,
+            Nfd {
+                owner: sender,
+                arweave_ptr: [0u8; 32],
+                content_hash: [0u8; 32],
+                thumb_ptr: None,
+                collection_id: Some(collection_id),
+                mint_height: ctx.height,
+                mint_tx_index: ctx.tx_index,
+                revealed: None,
+            },
+        );
+        // Defer the roll to a future block (ungrindable), carrying the input tier.
+        let seed_height = ctx.height + FORGE_DELAY;
+        self.pending_forges
+            .entry(seed_height)
+            .or_default()
+            .push(ForgePending { result_id: ctx.txid, input_tier: tier_a });
+        self.pending_forge_set.insert(ctx.txid);
+        self.undo.push(Undo::Forged { result_id: ctx.txid, seed_height, restored_inputs });
+
+        let mut d = vec![SUB_FORGE];
+        d.extend_from_slice(&ctx.txid);
+        d.extend_from_slice(&input_a);
+        d.extend_from_slice(&input_b);
+        d.extend_from_slice(&tier_a.to_be_bytes());
+        d.extend_from_slice(&seed_height.to_be_bytes());
+        Ok(d)
+    }
+
+    /// Resolve every reveal AND forge whose seed block is `height`, using
+    /// `block_hash` as the seed. The driver calls this once per block (after
+    /// records), folding the returned delta into the block fingerprint; each
+    /// resolution records an undo so a reorg of the seed block re-rolls correctly.
+    pub fn resolve_due(&mut self, height: u64, block_hash: &[u8; 32]) -> Vec<u8> {
         let mut delta = Vec::new();
-        for pack_id in due {
+        let reveals_due = self.pending_reveals.remove(&height).unwrap_or_default();
+        for pack_id in reveals_due {
             self.pending_set.remove(&pack_id);
             let cfg = self
                 .nfds
@@ -524,6 +683,26 @@ impl NfdLedger {
             if let Some(ut) = outcome.ur_tier {
                 delta.extend_from_slice(&ut.to_be_bytes());
             }
+        }
+        // Forge results whose seed block is this one: result tier = input tier +
+        // the halving bump, seeded by SHA256(result_id || block_hash).
+        let forges_due = self.pending_forges.remove(&height).unwrap_or_default();
+        for fp in forges_due {
+            self.pending_forge_set.remove(&fp.result_id);
+            let mut h = Sha256::new();
+            h.update(fp.result_id);
+            h.update(block_hash);
+            let digest = h.finalize();
+            let mut seed = [0u8; 32];
+            seed.copy_from_slice(&digest);
+            let result_tier = fp.input_tier.saturating_add(forge_tier_bump(&seed));
+            if let Some(nfd) = self.nfds.get_mut(&fp.result_id) {
+                nfd.revealed = Some(RevealOutcome { base_tier: result_tier, ur_tier: None });
+            }
+            self.undo.push(Undo::ForgeResolved { result_id: fp.result_id, seed_height: height, input_tier: fp.input_tier });
+            delta.push(SUB_FORGE);
+            delta.extend_from_slice(&fp.result_id);
+            delta.extend_from_slice(&result_tier.to_be_bytes());
         }
         delta
     }
@@ -559,6 +738,7 @@ impl RecordHandler for NfdLedger {
             SUB_COLLECTION => self.apply_collection_create(rec.body, ctx),
             SUB_COMMISSION => self.apply_commission_set(rec.body, ctx),
             SUB_REVEAL => self.apply_reveal(rec.body, ctx),
+            SUB_FORGE => self.apply_forge(rec.body, ctx),
             other => Err(Ignored::UnknownSubtype(other)),
         }
     }
@@ -620,6 +800,27 @@ pub fn resolve_reveal(seed: &[u8; 32], cfg: &RarityConfig) -> RevealOutcome {
         ur_tier = Some(ut);
     }
     RevealOutcome { base_tier: base, ur_tier }
+}
+
+/// The forge tier bump K from a 32-byte seed: treat the seed's bits as fair coin
+/// flips (MSB first), K = (leading 1-bits) + 1, capped at FORGE_MAX_BUMP. So
+/// P(K=1)=1/2, P(K=2)=1/4, ..., exactly the halving spec in docs/NFD-FORGING.md.
+/// This is the authoritative roll; the wallet reads the result back from here.
+pub fn forge_tier_bump(seed: &[u8; 32]) -> u16 {
+    let mut heads: u16 = 0;
+    'outer: for &byte in seed.iter() {
+        for i in (0..8).rev() {
+            if (byte >> i) & 1 == 1 {
+                heads += 1;
+                if heads + 1 >= FORGE_MAX_BUMP {
+                    break 'outer; // capped
+                }
+            } else {
+                break 'outer; // first tail ends the run
+            }
+        }
+    }
+    (heads + 1).min(FORGE_MAX_BUMP)
 }
 
 #[cfg(test)]
@@ -1124,5 +1325,150 @@ mod tests {
         // deterministic for that hash)
         assert!(!l.resolve_due(106, &[0x99; 32]).is_empty());
         assert!(l.revealed_of(&[10; 32]).is_some());
+    }
+
+    // A flat Perc config: tier_count 1, no ultra-rares, so every reveal resolves
+    // to tier 1 deterministically — gives two same-tier inputs to forge.
+    fn perc_collection_body_flat() -> Vec<u8> {
+        let mut b = collection_body(0);
+        b.extend_from_slice(&1u16.to_be_bytes()); // tier_count = 1
+        b.extend_from_slice(&0u32.to_be_bytes()); // ur_basic_ppm
+        b.extend_from_slice(&0u32.to_be_bytes()); // ur_progressive_ppm
+        b.extend_from_slice(&0u16.to_be_bytes()); // ur_count = 0
+        b
+    }
+
+    // Build a Perc collection (id [5;32], creator) with two revealed tier-1 packs
+    // (ids [10;32], [11;32]) owned by the creator, ready to forge.
+    fn ledger_with_two_revealed_packs() -> NfdLedger {
+        let mut l = NfdLedger::new();
+        let creator = addr(7);
+        let cid = [5u8; 32];
+        l.apply(&rec(SUB_COLLECTION, &perc_collection_body_flat()), &ctx(5, Some(creator))).unwrap();
+        l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx(10, Some(creator))).unwrap();
+        l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx(11, Some(creator))).unwrap();
+        l.apply(&rec(SUB_REVEAL, &[10u8; 32].to_vec()), &ctx(12, Some(creator))).unwrap();
+        l.apply(&rec(SUB_REVEAL, &[11u8; 32].to_vec()), &ctx(13, Some(creator))).unwrap();
+        l.resolve_due(106, &[0x42; 32]); // both resolve to tier 1
+        assert_eq!(l.revealed_of(&[10; 32]).unwrap().base_tier, 1);
+        assert_eq!(l.revealed_of(&[11; 32]).unwrap().base_tier, 1);
+        let _ = l.take_block_undo();
+        l
+    }
+
+    fn forge_body(a: [u8; 32], b: [u8; 32], cid: [u8; 32]) -> Vec<u8> {
+        let mut v = a.to_vec();
+        v.extend_from_slice(&b);
+        v.extend_from_slice(&cid);
+        v
+    }
+
+    #[test]
+    fn forge_burns_inputs_creates_sealed_result_and_resolves_above_minimum() {
+        let mut l = ledger_with_two_revealed_packs();
+        let creator = addr(7);
+        let cid = [5u8; 32];
+
+        // Commit the forge (forge txid [30;32], height 100 -> seed height 106).
+        l.apply(&rec(SUB_FORGE, &forge_body([10; 32], [11; 32], cid)), &ctx(30, Some(creator))).unwrap();
+
+        // Both inputs burned; the result pack exists, sealed, owned by the forger.
+        assert!(l.get(&[10; 32]).is_none());
+        assert!(l.get(&[11; 32]).is_none());
+        assert_eq!(l.owner_of(&[30; 32]), Some(pk(7)));
+        assert_eq!(l.revealed_of(&[30; 32]), None); // sealed until its seed block
+        assert!(l.forge_pending(&[30; 32]));
+        // A forge result cannot be opened via the normal reveal path.
+        assert!(l.apply(&rec(SUB_REVEAL, &[30u8; 32].to_vec()), &ctx(31, Some(creator))).is_err());
+
+        let _ = l.take_block_undo();
+        // Nothing resolves before the seed block.
+        assert!(l.resolve_due(105, &[0x42; 32]).is_empty());
+        assert_eq!(l.revealed_of(&[30; 32]), None);
+        // The seed block resolves it to at least input_tier + 1 (guaranteed upgrade).
+        let delta = l.resolve_due(106, &[0x42; 32]);
+        assert!(!delta.is_empty());
+        let out = l.revealed_of(&[30; 32]).expect("forge resolved");
+        assert!(out.base_tier >= 2, "forge is always an upgrade: {}", out.base_tier);
+        assert_eq!(out.ur_tier, None);
+        assert!(!l.forge_pending(&[30; 32]));
+
+        // Reorg of the seed block re-seals + re-pends the forge result.
+        let undo_resolve = l.take_block_undo();
+        l.rollback_block(undo_resolve);
+        assert_eq!(l.revealed_of(&[30; 32]), None);
+        assert!(l.forge_pending(&[30; 32]));
+    }
+
+    #[test]
+    fn forge_commit_rolls_back_restoring_the_burned_inputs() {
+        let mut l = ledger_with_two_revealed_packs();
+        let creator = addr(7);
+        let cid = [5u8; 32];
+        l.apply(&rec(SUB_FORGE, &forge_body([10; 32], [11; 32], cid)), &ctx(30, Some(creator))).unwrap();
+        assert!(l.get(&[10; 32]).is_none() && l.get(&[30; 32]).is_some());
+
+        // Reorg the forge-commit block: inputs come back exactly, result vanishes.
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert_eq!(l.owner_of(&[10; 32]), Some(pk(7)));
+        assert_eq!(l.revealed_of(&[10; 32]).unwrap().base_tier, 1);
+        assert_eq!(l.owner_of(&[11; 32]), Some(pk(7)));
+        assert!(l.get(&[30; 32]).is_none());
+        assert!(!l.forge_pending(&[30; 32]));
+    }
+
+    #[test]
+    fn forge_rejects_bad_inputs() {
+        let cid = [5u8; 32];
+        let creator = addr(7);
+        // not the owner
+        let mut l = ledger_with_two_revealed_packs();
+        assert!(l.apply(&rec(SUB_FORGE, &forge_body([10; 32], [11; 32], cid)), &ctx(30, Some(addr(3)))).is_err());
+        assert!(l.get(&[10; 32]).is_some()); // nothing burned on a rejected forge
+
+        // same pack twice
+        let mut l = ledger_with_two_revealed_packs();
+        assert!(l.apply(&rec(SUB_FORGE, &forge_body([10; 32], [10; 32], cid)), &ctx(30, Some(creator))).is_err());
+
+        // an unrevealed input (mint a fresh sealed pack, don't reveal it)
+        let mut l = ledger_with_two_revealed_packs();
+        l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx(14, Some(creator))).unwrap(); // [14;32] sealed
+        assert!(l.apply(&rec(SUB_FORGE, &forge_body([10; 32], [14; 32], cid)), &ctx(30, Some(creator))).is_err());
+
+        // trailing bytes rejected
+        let mut l = ledger_with_two_revealed_packs();
+        let mut body = forge_body([10; 32], [11; 32], cid);
+        body.push(0);
+        assert!(l.apply(&rec(SUB_FORGE, &body), &ctx(30, Some(creator))).is_err());
+    }
+
+    #[test]
+    fn forge_tier_bump_is_always_at_least_one_and_halves() {
+        assert_eq!(forge_tier_bump(&[0x00; 32]), 1); // first flip tail -> +1
+        assert_eq!(forge_tier_bump(&[0xff; 32]), FORGE_MAX_BUMP); // all heads -> capped
+        let mut seed = [0u8; 32];
+        seed[0] = 0b1011_1111; // one head then tail -> +2
+        assert_eq!(forge_tier_bump(&seed), 2);
+        // distribution: ~50% +1, ~25% +2 over pseudo-random seeds
+        let n = 40_000u32;
+        let (mut k1, mut k2) = (0u32, 0u32);
+        for i in 0..n {
+            let mut h = Sha256::new();
+            h.update(b"forge-idx-dist");
+            h.update(i.to_le_bytes());
+            let d = h.finalize();
+            let mut s = [0u8; 32];
+            s.copy_from_slice(&d);
+            match forge_tier_bump(&s) {
+                1 => k1 += 1,
+                2 => k2 += 1,
+                _ => {}
+            }
+        }
+        let p1 = k1 as f64 / n as f64;
+        let p2 = k2 as f64 / n as f64;
+        assert!((p1 - 0.5).abs() < 0.02, "P(+1)={p1}");
+        assert!((p2 - 0.25).abs() < 0.02, "P(+2)={p2}");
     }
 }
