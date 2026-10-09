@@ -24,6 +24,7 @@
 
 #include <string>
 #include <vector>
+#include "NodeId.h"
 
 class CNode;
 class CDataStream;
@@ -59,6 +60,9 @@ void OnPeerDisconnected(CNode* pnode);
 
 /** Settings: -relayhelper (offer helping) and -relayclient (use helpers). */
 bool HelpingEnabled();
+/** Is this peer the control connection of a node we are helping? Such a
+ *  connection must never be evicted to make room. */
+bool IsRegistrationControl(NodeId id);
 bool ClientEnabled();
 
 /** Periodic (every minute): decide whether we are a home node, keep three

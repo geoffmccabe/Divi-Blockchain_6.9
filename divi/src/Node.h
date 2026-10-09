@@ -351,6 +351,8 @@ public:
     void SetToCurrentlyConnected();
     bool IsSelfConnection(uint64_t otherNonce) const;
     NodeId GetId() const;
+    /** When this connection was made (unix seconds); for eviction choices. */
+    int64_t GetTimeConnected() const { return nTimeConnected; }
     int GetRefCount() const;
 
     CNode* AddRef()

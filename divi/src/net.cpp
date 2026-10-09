@@ -840,7 +840,13 @@ public:
                 } else if (!IsSelectableSocket(hSocket)) {
                     LogPrintf("connection from %s dropped: non-selectable socket\n", addr);
                     CloseSocket(hSocket);
-                } else if (nInbound >= nMaxConnections - MAX_OUTBOUND_CONNECTIONS) {
+                } else if (nInbound >= nMaxConnections - MAX_OUTBOUND_CONNECTIONS && !EvictOneOldInbound()) {
+                    /* Full, and nothing worth evicting: drop the newcomer. A
+                       helper used to drop every newcomer once ordinary peers
+                       had filled it, registrations included: Europe sat at
+                       142/125 on 2026-Oct-09 and no home node could reach it.
+                       Now the longest-connected OLD-VERSION inbound peer makes
+                       way first (see EvictOneOldInbound). */
                     LogPrint("net", "connection from %s dropped (full)\n", addr);
                     CloseSocket(hSocket);
                 } else if (PeerBanningService::IsBanned(GetTime(),addr) && !whitelisted) {
@@ -852,6 +858,30 @@ public:
                 }
             }
         }
+    }
+
+    /* Make room for a newcomer by disconnecting one inbound peer that runs
+       old software (no addrv2 = cannot take part in relay) and is not a relay
+       pipe, a relayed connection, or a home node's control connection. The
+       longest-connected one goes: it has had its turn. Returns false when
+       there is no such peer. */
+    bool EvictOneOldInbound()
+    {
+        CNode* victim = NULL;
+        {
+            LOCK(cs_vNodes);
+            for (CNode* pnode : vNodes) {
+                if (!pnode->fInbound || pnode->fRelayPipe || pnode->fRelayed || pnode->fWantsAddrV2) continue;
+                if (pnode->GetVersion() == 0) continue;           // still shaking hands
+                if (PeerRelay::IsRegistrationControl(pnode->GetId())) continue;
+                if (!victim || pnode->GetTimeConnected() < victim->GetTimeConnected()) victim = pnode;
+            }
+            if (victim) {
+                LogPrint("net", "evicting old-version inbound peer=%d to make room\n", victim->GetId());
+                victim->FlagForDisconnection();
+            }
+        }
+        return victim != NULL;
     }
 
     bool SocketReceiveDataFromPeer(CNode* pnode, boost::condition_variable& messageHandlerCondition)

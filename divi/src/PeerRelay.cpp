@@ -165,6 +165,14 @@ void AnnounceRelayedAddresses()
 }
 } // namespace
 
+bool IsRegistrationControl(NodeId id)
+{
+    LOCK(cs_relay);
+    for (const auto& r : g_registered)
+        if (r.second.control == id) return true;
+    return false;
+}
+
 bool HelpingEnabled()
 {
     return settings.GetBoolArg("-relayhelper", true);
