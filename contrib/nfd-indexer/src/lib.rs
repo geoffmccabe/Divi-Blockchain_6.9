@@ -59,6 +59,22 @@ const SUB_COMMISSION: u8 = 0x09;
 /// is NOT down-only). `None` until the creator sets one, in which case forging is
 /// free. When set, a FORGE is valid only if it pays >= amount_duffs to payout.
 const SUB_FORGE_FEE: u8 = 0x0A;
+/// LIST 0x0B: item_id(32) | price_duffs(8) | payout(21) | expiry_height(8). The
+/// current owner lists an item for sale at `price` (what the BUYER pays), paid to
+/// `payout`. Listing LOCKS the item: while listed it cannot be transferred,
+/// forged, or revealed, so the seller cannot front-run or double-sell it. The
+/// owner can re-list (update) or CANCEL. `expiry_height` 0 = never expires.
+const SUB_LIST: u8 = 0x0B;
+/// CANCEL-LISTING 0x0C: item_id(32). The lister removes their listing and unlocks
+/// the item.
+const SUB_CANCEL: u8 = 0x0C;
+/// BUY 0x0D: item_id(32). The buyer (funding sender) purchases a listed item. The
+/// transaction must pay >= creator commission to the creator payout AND >= the
+/// seller's net (price - commission) to the listing payout; the indexer then
+/// moves ownership to the buyer and clears the listing. Settling payment and the
+/// ownership move in ONE buyer transaction, against a locked item, is what makes
+/// the sale safe without custody.
+const SUB_BUY: u8 = 0x0D;
 const FLAG_HAS_THUMB: u8 = 0x02;
 const FLAG_IN_COLLECTION: u8 = 0x04;
 
@@ -157,6 +173,14 @@ pub enum Undo {
     /// A pending forge was resolved at its seed block. Clear the result's tier
     /// and put it back on the pending forge list for that height.
     ForgeResolved { result_id: [u8; 32], seed_height: u64, input_tier: u16 },
+    /// A listing was created or updated. Restore the listing it replaced (`None`
+    /// means the item had no listing before, so remove it).
+    Listed { item_id: [u8; 32], previous: Option<Listing> },
+    /// A listing was cancelled. Put it back exactly.
+    ListingCancelled { item_id: [u8; 32], previous: Listing },
+    /// An item was bought: ownership moved to the buyer and the listing cleared.
+    /// Restore the seller as owner and re-list it exactly as it was.
+    Bought { item_id: [u8; 32], previous_owner: Addr21, listing: Listing },
 }
 
 /// A forge result awaiting its seed block: the new pack's id plus the shared
@@ -165,6 +189,18 @@ pub enum Undo {
 struct ForgePending {
     result_id: [u8; 32],
     input_tier: u16,
+}
+
+/// An active marketplace listing on an item. `price` is what the buyer pays (the
+/// creator commission comes out of it; the seller nets price - commission).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Listing {
+    pub price: u64,
+    pub payout: Addr21,
+    /// Block height at/after which the listing is expired (0 = never).
+    pub expiry: u64,
+    /// The owner who listed it (must still own it for a buy to settle).
+    pub seller: Addr21,
 }
 
 /// The NFD ownership ledger. Keyed by mint txid (the collectible's id).
@@ -184,6 +220,10 @@ pub struct NfdLedger {
     /// (so the pack can't also be revealed through the normal reveal path).
     pending_forges: HashMap<u64, Vec<ForgePending>>,
     pending_forge_set: HashSet<[u8; 32]>,
+    /// Active marketplace listings, keyed by item id. An item present here is
+    /// LOCKED: it cannot be transferred, forged, or revealed until it is bought,
+    /// cancelled, or (TODO, if ever) expired.
+    listings: HashMap<[u8; 32], Listing>,
     /// Inverses of everything applied since the last [`NfdLedger::take_block_undo`].
     undo: Vec<Undo>,
 }
@@ -220,6 +260,21 @@ impl NfdLedger {
     /// `None` means forging this collection's packs is free.
     pub fn forge_fee_of(&self, id: &[u8; 32]) -> Option<(u64, Addr21)> {
         self.collections.get(id).and_then(|c| c.forge_fee)
+    }
+    /// The active marketplace listing on an item, if any.
+    pub fn listing_of(&self, item_id: &[u8; 32]) -> Option<Listing> {
+        self.listings.get(item_id).copied()
+    }
+    /// Whether an item is currently listed (and therefore locked).
+    pub fn is_listed(&self, item_id: &[u8; 32]) -> bool {
+        self.listings.contains_key(item_id)
+    }
+    /// Every active listing, as (item_id, Listing), sorted by item id for a
+    /// deterministic order. For the marketplace browse.
+    pub fn all_listings(&self) -> Vec<([u8; 32], Listing)> {
+        let mut v: Vec<_> = self.listings.iter().map(|(id, l)| (*id, *l)).collect();
+        v.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        v
     }
     /// The on-chain rarity config for a collection, if it is a blind-pack set.
     pub fn rarity_of(&self, id: &[u8; 32]) -> Option<RarityConfig> {
@@ -302,6 +357,19 @@ impl NfdLedger {
                     if let Some(col) = self.collections.get_mut(&id) {
                         col.forge_fee = previous;
                     }
+                }
+                Undo::Listed { item_id, previous } => match previous {
+                    Some(prev) => { self.listings.insert(item_id, prev); }
+                    None => { self.listings.remove(&item_id); }
+                },
+                Undo::ListingCancelled { item_id, previous } => {
+                    self.listings.insert(item_id, previous);
+                }
+                Undo::Bought { item_id, previous_owner, listing } => {
+                    if let Some(nfd) = self.nfds.get_mut(&item_id) {
+                        nfd.owner = previous_owner;
+                    }
+                    self.listings.insert(item_id, listing);
                 }
                 Undo::RevealCommitted { pack_id, seed_height } => {
                     self.drop_pending(&pack_id, seed_height);
@@ -414,6 +482,10 @@ impl NfdLedger {
             return Err(Ignored::TrailingBytes);
         }
         let sender = Self::sender(ctx)?;
+        // A listed item is locked: it must be cancelled before it can be moved.
+        if self.listings.contains_key(&mint_txid) {
+            return Err(Ignored::RuleViolation("item is listed for sale; cancel the listing first"));
+        }
         // Read current owner + collection without holding a mutable borrow.
         let (previous_owner, collection_id) = {
             let nfd = self.nfds.get(&mint_txid).ok_or(Ignored::RuleViolation("unknown nfd"))?;
@@ -569,6 +641,133 @@ impl NfdLedger {
         Ok(d)
     }
 
+    /// List an item for sale (or update an existing listing). Signed by the
+    /// current owner. The item is LOCKED while listed.
+    fn apply_list(&mut self, body: &[u8], ctx: &RecordContext) -> Result<Vec<u8>, Ignored> {
+        let mut c = Cursor::new(body);
+        let item_id = read32(&mut c)?;
+        let pr = c.read_bytes(8).map_err(|_| Ignored::Malformed("price"))?;
+        let mut pr8 = [0u8; 8];
+        pr8.copy_from_slice(pr);
+        let price = u64::from_be_bytes(pr8);
+        let po = c.read_bytes(21).map_err(|_| Ignored::Malformed("payout"))?;
+        let mut payout: Addr21 = [0u8; 21];
+        payout.copy_from_slice(po);
+        let ex = c.read_bytes(8).map_err(|_| Ignored::Malformed("expiry"))?;
+        let mut ex8 = [0u8; 8];
+        ex8.copy_from_slice(ex);
+        let expiry = u64::from_be_bytes(ex8);
+        if !c.is_empty() {
+            return Err(Ignored::TrailingBytes);
+        }
+        if price == 0 {
+            return Err(Ignored::RuleViolation("price must be greater than zero"));
+        }
+        let sender = Self::sender(ctx)?;
+        // Must be the current owner. A pack mid-reveal/mid-forge cannot be listed.
+        let nfd = self.nfds.get(&item_id).ok_or(Ignored::RuleViolation("unknown nfd"))?;
+        if nfd.owner != sender {
+            return Err(Ignored::RuleViolation("only the owner may list it"));
+        }
+        if self.pending_set.contains(&item_id) || self.pending_forge_set.contains(&item_id) {
+            return Err(Ignored::RuleViolation("item is resolving a reveal/forge; try again once it settles"));
+        }
+        let previous = self.listings.get(&item_id).copied();
+        self.listings.insert(item_id, Listing { price, payout, expiry, seller: sender });
+        self.undo.push(Undo::Listed { item_id, previous });
+
+        let mut d = vec![SUB_LIST];
+        d.extend_from_slice(&item_id);
+        d.extend_from_slice(&price.to_be_bytes());
+        d.extend_from_slice(&payout);
+        d.extend_from_slice(&expiry.to_be_bytes());
+        Ok(d)
+    }
+
+    /// Cancel a listing and unlock the item. Signed by the lister (current owner).
+    fn apply_cancel(&mut self, body: &[u8], ctx: &RecordContext) -> Result<Vec<u8>, Ignored> {
+        let mut c = Cursor::new(body);
+        let item_id = read32(&mut c)?;
+        if !c.is_empty() {
+            return Err(Ignored::TrailingBytes);
+        }
+        let sender = Self::sender(ctx)?;
+        let listing = *self.listings.get(&item_id).ok_or(Ignored::RuleViolation("item is not listed"))?;
+        // Only the current owner (the lister) may cancel.
+        if self.nfds.get(&item_id).map(|n| n.owner) != Some(sender) {
+            return Err(Ignored::RuleViolation("only the owner may cancel the listing"));
+        }
+        self.listings.remove(&item_id);
+        self.undo.push(Undo::ListingCancelled { item_id, previous: listing });
+
+        let mut d = vec![SUB_CANCEL];
+        d.extend_from_slice(&item_id);
+        Ok(d)
+    }
+
+    /// Buy a listed item. The buyer (funding sender) must pay, in this same
+    /// transaction, >= the creator commission to the creator payout AND >= the
+    /// seller's net (price - commission) to the listing payout. Ownership then
+    /// moves to the buyer and the listing clears. Settling money + ownership in
+    /// one buyer tx against a LOCKED item is what makes the sale non-custodial
+    /// and safe: the seller cannot have moved the item away (it was locked), and
+    /// the buyer cannot take ownership without paying.
+    fn apply_buy(&mut self, body: &[u8], ctx: &RecordContext) -> Result<Vec<u8>, Ignored> {
+        let mut c = Cursor::new(body);
+        let item_id = read32(&mut c)?;
+        if !c.is_empty() {
+            return Err(Ignored::TrailingBytes);
+        }
+        let buyer = Self::sender(ctx)?;
+        let listing = *self.listings.get(&item_id).ok_or(Ignored::RuleViolation("item is not listed"))?;
+        // Expired listings cannot be bought (0 = never expires).
+        if listing.expiry != 0 && ctx.height >= listing.expiry {
+            return Err(Ignored::RuleViolation("listing has expired"));
+        }
+        let (previous_owner, collection_id) = {
+            let nfd = self.nfds.get(&item_id).ok_or(Ignored::RuleViolation("unknown nfd"))?;
+            (nfd.owner, nfd.collection_id)
+        };
+        // The lister must still be the owner (a lock should guarantee this, but we
+        // verify rather than trust it).
+        if previous_owner != listing.seller {
+            return Err(Ignored::RuleViolation("listing is stale: the seller no longer owns the item"));
+        }
+        if buyer == previous_owner {
+            return Err(Ignored::RuleViolation("the owner cannot buy their own listing"));
+        }
+        // Creator commission (if any) comes OUT of the price; the seller nets the
+        // rest. The buyer's transaction must pay BOTH, each to the right address.
+        let commission = collection_id
+            .and_then(|cid| self.collections.get(&cid))
+            .and_then(|col| col.commission)
+            .filter(|(amount, _)| *amount > 0);
+        let paid_to = |addr: &Addr21| -> u64 {
+            let mut h = [0u8; 20];
+            h.copy_from_slice(&addr[1..21]);
+            ctx.payments.get(&(addr[0], h)).copied().unwrap_or(0)
+        };
+        let commission_amount = commission.map(|(a, _)| a).unwrap_or(0);
+        if let Some((amount, payout)) = commission {
+            if paid_to(&payout) < amount {
+                return Err(Ignored::RuleViolation("creator commission not paid"));
+            }
+        }
+        let seller_net = listing.price.saturating_sub(commission_amount);
+        if paid_to(&listing.payout) < seller_net {
+            return Err(Ignored::RuleViolation("seller not paid the listed price"));
+        }
+        // Settle: move ownership to the buyer and clear the listing.
+        self.nfds.get_mut(&item_id).expect("nfd present above").owner = buyer;
+        self.listings.remove(&item_id);
+        self.undo.push(Undo::Bought { item_id, previous_owner, listing });
+
+        let mut d = vec![SUB_BUY];
+        d.extend_from_slice(&item_id);
+        d.extend_from_slice(&buyer);
+        Ok(d)
+    }
+
     /// Commit a reveal: the owner of a sealed Perc asks to reveal it. The result
     /// is NOT decided here — it is resolved at a future block (REVEAL_DELAY
     /// later) in [`resolve_due`], so the roll cannot be ground.
@@ -585,6 +784,9 @@ impl NfdLedger {
         };
         if owner != sender {
             return Err(Ignored::RuleViolation("only the owner may reveal it"));
+        }
+        if self.listings.contains_key(&pack_id) {
+            return Err(Ignored::RuleViolation("pack is listed for sale; cancel the listing first"));
         }
         if already_revealed {
             return Err(Ignored::RuleViolation("already revealed"));
@@ -629,6 +831,10 @@ impl NfdLedger {
         }
         if input_a == input_b {
             return Err(Ignored::RuleViolation("forge needs two different packs"));
+        }
+        // A listed input is locked for sale: it cannot be consumed by a forge.
+        if self.listings.contains_key(&input_a) || self.listings.contains_key(&input_b) {
+            return Err(Ignored::RuleViolation("an input is listed for sale; cancel the listing first"));
         }
         // The result pack is keyed by the forge txid; refuse a collision.
         if self.nfds.contains_key(&ctx.txid) || self.pending_forge_set.contains(&ctx.txid) {
@@ -806,6 +1012,9 @@ impl RecordHandler for NfdLedger {
             SUB_COLLECTION => self.apply_collection_create(rec.body, ctx),
             SUB_COMMISSION => self.apply_commission_set(rec.body, ctx),
             SUB_FORGE_FEE => self.apply_forge_fee(rec.body, ctx),
+            SUB_LIST => self.apply_list(rec.body, ctx),
+            SUB_CANCEL => self.apply_cancel(rec.body, ctx),
+            SUB_BUY => self.apply_buy(rec.body, ctx),
             SUB_REVEAL => self.apply_reveal(rec.body, ctx),
             SUB_FORGE => self.apply_forge(rec.body, ctx),
             other => Err(Ignored::UnknownSubtype(other)),
@@ -1584,5 +1793,112 @@ mod tests {
         l.apply(&rec(SUB_FORGE, &forge_body([10; 32], [11; 32], cid)), &ctx_pay(30, Some(creator), pay(payout, 100))).unwrap();
         assert!(l.get(&[10; 32]).is_none());
         assert_eq!(l.owner_of(&[30; 32]), Some(pk(7)));
+    }
+
+    // --- Marketplace (list / cancel / buy) ---------------------------------
+
+    fn list_body(item_id: u8, price: u64, payout: Addr21, expiry: u64) -> Vec<u8> {
+        let mut b = vec![item_id; 32];
+        b.extend_from_slice(&price.to_be_bytes());
+        b.extend_from_slice(&payout);
+        b.extend_from_slice(&expiry.to_be_bytes());
+        b
+    }
+    // A ledger with one plain minted item [20;32] in collection [5;32], owned by
+    // the seller addr(7). The collection creator is also addr(7).
+    fn ledger_with_one_item() -> NfdLedger {
+        let mut l = NfdLedger::new();
+        let seller = addr(7);
+        l.apply(&rec(SUB_COLLECTION, &collection_body(0)), &ctx(5, Some(seller))).unwrap();
+        l.apply(&rec(SUB_MINT, &mint_into_body([5u8; 32])), &ctx(20, Some(seller))).unwrap();
+        assert_eq!(l.owner_of(&[20; 32]), Some(pk(7)));
+        let _ = l.take_block_undo();
+        l
+    }
+
+    #[test]
+    fn listing_locks_the_item_and_cancel_unlocks_it() {
+        let mut l = ledger_with_one_item();
+        let seller = addr(7);
+        // Only the owner may list.
+        assert!(l.apply(&rec(SUB_LIST, &list_body(20, 1000, pk(7), 0)), &ctx(21, Some(addr(3)))).is_err());
+        // The owner lists it.
+        l.apply(&rec(SUB_LIST, &list_body(20, 1000, pk(7), 0)), &ctx(21, Some(seller))).unwrap();
+        assert!(l.is_listed(&[20; 32]));
+        assert_eq!(l.listing_of(&[20; 32]).map(|x| x.price), Some(1000));
+        // While listed it is LOCKED: a transfer is refused.
+        assert!(l.apply(&rec(SUB_TRANSFER, &transfer_body(20, 9)), &ctx(22, Some(seller))).is_err());
+        assert_eq!(l.owner_of(&[20; 32]), Some(pk(7)));
+        let _ = l.take_block_undo();
+        // Cancel unlocks it; now a transfer works.
+        l.apply(&rec(SUB_CANCEL, &[20u8; 32].to_vec()), &ctx(23, Some(seller))).unwrap();
+        assert!(!l.is_listed(&[20; 32]));
+        l.apply(&rec(SUB_TRANSFER, &transfer_body(20, 9)), &ctx(24, Some(seller))).unwrap();
+        assert_eq!(l.owner_of(&[20; 32]), Some(pk(9)));
+    }
+
+    #[test]
+    fn listing_and_cancel_roll_back() {
+        let mut l = ledger_with_one_item();
+        let seller = addr(7);
+        l.apply(&rec(SUB_LIST, &list_body(20, 1000, pk(7), 0)), &ctx(21, Some(seller))).unwrap();
+        // Reorg the list block: the item is no longer listed.
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert!(!l.is_listed(&[20; 32]));
+        // List again, seal that block, then cancel and reorg the cancel: re-listed.
+        l.apply(&rec(SUB_LIST, &list_body(20, 1000, pk(7), 0)), &ctx(22, Some(seller))).unwrap();
+        let _ = l.take_block_undo();
+        l.apply(&rec(SUB_CANCEL, &[20u8; 32].to_vec()), &ctx(23, Some(seller))).unwrap();
+        assert!(!l.is_listed(&[20; 32]));
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert!(l.is_listed(&[20; 32]));
+    }
+
+    #[test]
+    fn buy_pays_seller_and_commission_then_moves_ownership() {
+        let mut l = ledger_with_one_item();
+        let seller = addr(7);
+        let buyer = addr(3);
+        // Creator sets a 200-duff commission to pk(2); seller nets 1000 - 200 = 800.
+        l.apply(&rec(SUB_COMMISSION, &commission_body([5u8; 32], 200, pk(2))), &ctx(25, Some(seller))).unwrap();
+        l.apply(&rec(SUB_LIST, &list_body(20, 1000, pk(7), 0)), &ctx(26, Some(seller))).unwrap();
+        let _ = l.take_block_undo();
+
+        // Paying nothing is rejected.
+        assert!(l.apply(&rec(SUB_BUY, &[20u8; 32].to_vec()), &ctx(27, Some(buyer))).is_err());
+        // Paying the seller but not the commission is rejected.
+        assert!(l.apply(&rec(SUB_BUY, &[20u8; 32].to_vec()), &ctx_pay(27, Some(buyer), pay(pk(7), 800))).is_err());
+        // Paying the commission but underpaying the seller is rejected.
+        let mut underpay = pay(pk(2), 200);
+        { let mut h = [0u8; 20]; h.copy_from_slice(&pk(7)[1..21]); underpay.insert((pk(7)[0], h), 799); }
+        assert!(l.apply(&rec(SUB_BUY, &[20u8; 32].to_vec()), &ctx_pay(27, Some(buyer), underpay)).is_err());
+        assert_eq!(l.owner_of(&[20; 32]), Some(pk(7))); // nothing moved on a rejected buy
+
+        // Paying both (commission to pk(2), net to pk(7)) settles the sale.
+        let mut full = pay(pk(2), 200);
+        { let mut h = [0u8; 20]; h.copy_from_slice(&pk(7)[1..21]); full.insert((pk(7)[0], h), 800); }
+        l.apply(&rec(SUB_BUY, &[20u8; 32].to_vec()), &ctx_pay(27, Some(buyer), full.clone())).unwrap();
+        assert_eq!(l.owner_of(&[20; 32]), Some(pk(3))); // now the buyer's
+        assert!(!l.is_listed(&[20; 32]));
+
+        // Reorg the buy: ownership returns to the seller and it is re-listed.
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert_eq!(l.owner_of(&[20; 32]), Some(pk(7)));
+        assert!(l.is_listed(&[20; 32]));
+    }
+
+    #[test]
+    fn buy_rejects_expired_and_owner_self_buy() {
+        let mut l = ledger_with_one_item();
+        let seller = addr(7);
+        // Expires at height 100; ctx height is 100, so it is expired at buy time.
+        l.apply(&rec(SUB_LIST, &list_body(20, 500, pk(7), 100)), &ctx(26, Some(seller))).unwrap();
+        let _ = l.take_block_undo();
+        assert!(l.apply(&rec(SUB_BUY, &[20u8; 32].to_vec()), &ctx_pay(27, Some(addr(3)), pay(pk(7), 500))).is_err());
+        // The owner cannot buy their own listing.
+        assert!(l.apply(&rec(SUB_BUY, &[20u8; 32].to_vec()), &ctx_pay(27, Some(seller), pay(pk(7), 500))).is_err());
     }
 }
