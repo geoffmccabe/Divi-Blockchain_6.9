@@ -53,6 +53,12 @@ const FORGE_MAX_BUMP: u16 = 40;
 /// lowered (see docs/NFD-CREATOR-COMMISSION.md). Set on the collection; a
 /// transfer of a member is then valid only if it pays >= amount to payout.
 const SUB_COMMISSION: u8 = 0x09;
+/// COLLECTION-FORGE-FEE 0x0A: collection_id(32) | amount_duffs(8, big-endian u64)
+/// | payout(21 packed). Signed by the collection creator; freely settable (a
+/// forge is a voluntary act by the pack owner, so unlike the resale commission it
+/// is NOT down-only). `None` until the creator sets one, in which case forging is
+/// free. When set, a FORGE is valid only if it pays >= amount_duffs to payout.
+const SUB_FORGE_FEE: u8 = 0x0A;
 const FLAG_HAS_THUMB: u8 = 0x02;
 const FLAG_IN_COLLECTION: u8 = 0x04;
 
@@ -106,6 +112,10 @@ pub struct Collection {
     /// creator sets one. A transfer of a member must pay >= amount_duffs to
     /// payout to be valid. The amount can only be lowered over time.
     pub commission: Option<(u64, Addr21)>,
+    /// Creator forge fee (amount_duffs, payout address). `None` until the creator
+    /// sets one (then forging is free). A FORGE of this collection's packs must
+    /// pay >= amount_duffs to payout to be valid. Freely settable (not down-only).
+    pub forge_fee: Option<(u64, Addr21)>,
 }
 
 /// One reversible change, kept so a reorg can be undone exactly.
@@ -132,6 +142,9 @@ pub enum Undo {
     /// A collection's commission changed. Restore the amount/payout it replaced
     /// (`None` means the collection had no commission before).
     CommissionSet { id: [u8; 32], previous: Option<(u64, Addr21)> },
+    /// A collection's forge fee changed. Restore the amount/payout it replaced
+    /// (`None` means the collection had no forge fee before).
+    ForgeFeeSet { id: [u8; 32], previous: Option<(u64, Addr21)> },
     /// A reveal was committed (pending until its seed block). Drop it.
     RevealCommitted { pack_id: [u8; 32], seed_height: u64 },
     /// A pending reveal was resolved at its seed block. Clear the tier and put
@@ -202,6 +215,11 @@ impl NfdLedger {
     /// The current creator commission (amount_duffs, payout) for a collection.
     pub fn commission_of(&self, id: &[u8; 32]) -> Option<(u64, Addr21)> {
         self.collections.get(id).and_then(|c| c.commission)
+    }
+    /// The current creator forge fee (amount_duffs, payout) for a collection.
+    /// `None` means forging this collection's packs is free.
+    pub fn forge_fee_of(&self, id: &[u8; 32]) -> Option<(u64, Addr21)> {
+        self.collections.get(id).and_then(|c| c.forge_fee)
     }
     /// The on-chain rarity config for a collection, if it is a blind-pack set.
     pub fn rarity_of(&self, id: &[u8; 32]) -> Option<RarityConfig> {
@@ -278,6 +296,11 @@ impl NfdLedger {
                 Undo::CommissionSet { id, previous } => {
                     if let Some(col) = self.collections.get_mut(&id) {
                         col.commission = previous;
+                    }
+                }
+                Undo::ForgeFeeSet { id, previous } => {
+                    if let Some(col) = self.collections.get_mut(&id) {
+                        col.forge_fee = previous;
                     }
                 }
                 Undo::RevealCommitted { pack_id, seed_height } => {
@@ -469,7 +492,7 @@ impl NfdLedger {
             return Err(Ignored::RuleViolation("duplicate collection id for this tx"));
         }
         let creator = Self::sender(ctx)?;
-        self.collections.insert(ctx.txid, Collection { creator, max_supply, meta_ptr, minted: 0, commission: None, rarity });
+        self.collections.insert(ctx.txid, Collection { creator, max_supply, meta_ptr, minted: 0, commission: None, forge_fee: None, rarity });
         self.undo.push(Undo::CollectionCreated { id: ctx.txid });
 
         let mut d = vec![SUB_COLLECTION];
@@ -508,6 +531,38 @@ impl NfdLedger {
         self.undo.push(Undo::CommissionSet { id: cid, previous });
 
         let mut d = vec![SUB_COMMISSION];
+        d.extend_from_slice(&cid);
+        d.extend_from_slice(&amount.to_be_bytes());
+        d.extend_from_slice(&payout);
+        Ok(d)
+    }
+
+    fn apply_forge_fee(&mut self, body: &[u8], ctx: &RecordContext) -> Result<Vec<u8>, Ignored> {
+        let mut c = Cursor::new(body);
+        let cid = read32(&mut c)?;
+        let amt = c.read_bytes(8).map_err(|_| Ignored::Malformed("amount"))?;
+        let mut amt8 = [0u8; 8];
+        amt8.copy_from_slice(amt);
+        let amount = u64::from_be_bytes(amt8);
+        let po = c.read_bytes(21).map_err(|_| Ignored::Malformed("payout"))?;
+        let mut payout: Addr21 = [0u8; 21];
+        payout.copy_from_slice(po);
+        if !c.is_empty() {
+            return Err(Ignored::TrailingBytes);
+        }
+        let sender = Self::sender(ctx)?;
+        let col = self.collections.get_mut(&cid).ok_or(Ignored::RuleViolation("unknown collection"))?;
+        // Only the collection's creator may set its forge fee.
+        if col.creator != sender {
+            return Err(Ignored::RuleViolation("only the collection creator may set its forge fee"));
+        }
+        // Freely settable (up or down): forging is a voluntary act by the pack
+        // owner, so there is no captive-buyer to protect as with the commission.
+        let previous = col.forge_fee;
+        col.forge_fee = Some((amount, payout));
+        self.undo.push(Undo::ForgeFeeSet { id: cid, previous });
+
+        let mut d = vec![SUB_FORGE_FEE];
         d.extend_from_slice(&cid);
         d.extend_from_slice(&amount.to_be_bytes());
         d.extend_from_slice(&payout);
@@ -605,6 +660,19 @@ impl NfdLedger {
         let is_perc = self.collections.get(&collection_id).and_then(|c| c.rarity).is_some();
         if !is_perc {
             return Err(Ignored::RuleViolation("not a Perc collection"));
+        }
+        // Creator forge fee: if this collection carries one, the forge transaction
+        // must pay at least that amount to the payout address, or the forge is
+        // invalid (same uncircumventable mechanism as the transfer commission).
+        if let Some((amount, payout)) = self.collections.get(&collection_id).and_then(|c| c.forge_fee) {
+            if amount > 0 {
+                let mut h = [0u8; 20];
+                h.copy_from_slice(&payout[1..21]);
+                let paid = ctx.payments.get(&(payout[0], h)).copied().unwrap_or(0);
+                if paid < amount {
+                    return Err(Ignored::RuleViolation("forge fee not paid"));
+                }
+            }
         }
 
         // Burn the two inputs, remembering them exactly so a reorg can restore them.
@@ -737,6 +805,7 @@ impl RecordHandler for NfdLedger {
             SUB_KEYANNOUNCE => self.apply_key_announce(rec.body, ctx),
             SUB_COLLECTION => self.apply_collection_create(rec.body, ctx),
             SUB_COMMISSION => self.apply_commission_set(rec.body, ctx),
+            SUB_FORGE_FEE => self.apply_forge_fee(rec.body, ctx),
             SUB_REVEAL => self.apply_reveal(rec.body, ctx),
             SUB_FORGE => self.apply_forge(rec.body, ctx),
             other => Err(Ignored::UnknownSubtype(other)),
@@ -1470,5 +1539,50 @@ mod tests {
         let p2 = k2 as f64 / n as f64;
         assert!((p1 - 0.5).abs() < 0.02, "P(+1)={p1}");
         assert!((p2 - 0.25).abs() < 0.02, "P(+2)={p2}");
+    }
+
+    #[test]
+    fn forge_fee_creator_only_and_freely_settable() {
+        let mut l = ledger_with_two_revealed_packs();
+        let creator = addr(7);
+        let cid = [5u8; 32];
+        let payout = pk(9);
+        // A non-creator cannot set the forge fee.
+        assert!(l.apply(&rec(SUB_FORGE_FEE, &commission_body(cid, 100, payout)), &ctx(40, Some(addr(3)))).is_err());
+        assert_eq!(l.forge_fee_of(&cid), None);
+        // The creator sets it (100) in one block, then RAISES it (250) in the
+        // next (freely settable, not down-only).
+        l.apply(&rec(SUB_FORGE_FEE, &commission_body(cid, 100, payout)), &ctx(41, Some(creator))).unwrap();
+        assert_eq!(l.forge_fee_of(&cid), Some((100, payout)));
+        let _ = l.take_block_undo(); // seal the 100-set block
+        l.apply(&rec(SUB_FORGE_FEE, &commission_body(cid, 250, payout)), &ctx(42, Some(creator))).unwrap();
+        assert_eq!(l.forge_fee_of(&cid), Some((250, payout)));
+        // Rolling back only the raise restores the previous amount exactly.
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert_eq!(l.forge_fee_of(&cid), Some((100, payout)));
+    }
+
+    #[test]
+    fn forge_requires_the_set_fee_to_be_paid() {
+        let cid = [5u8; 32];
+        let creator = addr(7);
+        let payout = pk(9);
+
+        // With a fee set, a forge that pays nothing is rejected and burns nothing.
+        let mut l = ledger_with_two_revealed_packs();
+        l.apply(&rec(SUB_FORGE_FEE, &commission_body(cid, 100, payout)), &ctx(41, Some(creator))).unwrap();
+        let _ = l.take_block_undo();
+        assert!(l.apply(&rec(SUB_FORGE, &forge_body([10; 32], [11; 32], cid)), &ctx(30, Some(creator))).is_err());
+        assert!(l.get(&[10; 32]).is_some());
+
+        // Underpaying is rejected.
+        assert!(l.apply(&rec(SUB_FORGE, &forge_body([10; 32], [11; 32], cid)), &ctx_pay(30, Some(creator), pay(payout, 99))).is_err());
+        assert!(l.get(&[10; 32]).is_some());
+
+        // Paying the fee (to the payout) lets the forge through.
+        l.apply(&rec(SUB_FORGE, &forge_body([10; 32], [11; 32], cid)), &ctx_pay(30, Some(creator), pay(payout, 100))).unwrap();
+        assert!(l.get(&[10; 32]).is_none());
+        assert_eq!(l.owner_of(&[30; 32]), Some(pk(7)));
     }
 }
