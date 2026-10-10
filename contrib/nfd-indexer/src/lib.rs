@@ -75,6 +75,16 @@ const SUB_CANCEL: u8 = 0x0C;
 /// ownership move in ONE buyer transaction, against a locked item, is what makes
 /// the sale safe without custody.
 const SUB_BUY: u8 = 0x0D;
+/// MINT-PRICE-SET 0x0E: collection_id(32) | amount_duffs(8, big-endian u64) |
+/// payout(21 packed). Signed by the collection creator. Sets the PRIMARY mint
+/// price: while it is `Some`, anyone (not just the creator) may MINT a pack into
+/// the collection if their transaction pays >= amount_duffs to payout; the
+/// creator always mints free (so they can give packs away or sell at a discount
+/// by minting from the creator address). `None` until the creator sets one, in
+/// which case minting stays creator-only (the pre-mint model). Like the resale
+/// commission it is DOWN-ONLY: once set, the price can only be lowered, never
+/// raised, so the primary price is a promise that can improve but never worsen.
+const SUB_MINTPRICE: u8 = 0x0E;
 const FLAG_HAS_THUMB: u8 = 0x02;
 const FLAG_IN_COLLECTION: u8 = 0x04;
 
@@ -132,6 +142,12 @@ pub struct Collection {
     /// sets one (then forging is free). A FORGE of this collection's packs must
     /// pay >= amount_duffs to payout to be valid. Freely settable (not down-only).
     pub forge_fee: Option<(u64, Addr21)>,
+    /// Primary mint price (amount_duffs, payout address). `None` = minting is
+    /// creator-only (the pre-mint model). `Some` = anyone may MINT a pack into
+    /// this collection by paying >= amount_duffs to payout (the creator still
+    /// mints free, for giveaways/discounts). DOWN-ONLY: once set it can only be
+    /// lowered, never raised. The cap (`max_supply`) still bounds total mints.
+    pub mint_price: Option<(u64, Addr21)>,
 }
 
 /// One reversible change, kept so a reorg can be undone exactly.
@@ -161,6 +177,9 @@ pub enum Undo {
     /// A collection's forge fee changed. Restore the amount/payout it replaced
     /// (`None` means the collection had no forge fee before).
     ForgeFeeSet { id: [u8; 32], previous: Option<(u64, Addr21)> },
+    /// A collection's primary mint price changed. Restore the amount/payout it
+    /// replaced (`None` means the collection had no mint price before).
+    MintPriceSet { id: [u8; 32], previous: Option<(u64, Addr21)> },
     /// A reveal was committed (pending until its seed block). Drop it.
     RevealCommitted { pack_id: [u8; 32], seed_height: u64 },
     /// A pending reveal was resolved at its seed block. Clear the tier and put
@@ -261,6 +280,11 @@ impl NfdLedger {
     pub fn forge_fee_of(&self, id: &[u8; 32]) -> Option<(u64, Addr21)> {
         self.collections.get(id).and_then(|c| c.forge_fee)
     }
+    /// The current primary mint price (amount_duffs, payout) for a collection.
+    /// `None` means minting is creator-only (no public primary sale).
+    pub fn mint_price_of(&self, id: &[u8; 32]) -> Option<(u64, Addr21)> {
+        self.collections.get(id).and_then(|c| c.mint_price)
+    }
     /// The active marketplace listing on an item, if any.
     pub fn listing_of(&self, item_id: &[u8; 32]) -> Option<Listing> {
         self.listings.get(item_id).copied()
@@ -358,6 +382,11 @@ impl NfdLedger {
                         col.forge_fee = previous;
                     }
                 }
+                Undo::MintPriceSet { id, previous } => {
+                    if let Some(col) = self.collections.get_mut(&id) {
+                        col.mint_price = previous;
+                    }
+                }
                 Undo::Listed { item_id, previous } => match previous {
                     Some(prev) => { self.listings.insert(item_id, prev); }
                     None => { self.listings.remove(&item_id); }
@@ -438,11 +467,27 @@ impl NfdLedger {
         }
         let owner = Self::sender(ctx)?;
 
-        // Collection rules: only the creator may mint into it, and not past the cap.
+        // Collection rules. Minting is creator-only UNLESS the creator has set a
+        // primary mint price, in which case anyone may mint by paying >= the price
+        // to its payout (the uncircumventable payment check, as for commission and
+        // the forge fee). The creator always mints free, which is how they give
+        // packs away or sell at a discount. The cap bounds total mints either way.
         if let Some(cid) = collection_ref {
             let col = self.collections.get_mut(&cid).ok_or(Ignored::RuleViolation("unknown collection"))?;
             if col.creator != owner {
-                return Err(Ignored::RuleViolation("only the collection creator may mint into it"));
+                match col.mint_price {
+                    None => return Err(Ignored::RuleViolation("only the collection creator may mint into it")),
+                    Some((price, payout)) => {
+                        if price > 0 {
+                            let mut h = [0u8; 20];
+                            h.copy_from_slice(&payout[1..21]);
+                            let paid = ctx.payments.get(&(payout[0], h)).copied().unwrap_or(0);
+                            if paid < price {
+                                return Err(Ignored::RuleViolation("mint price not paid"));
+                            }
+                        }
+                    }
+                }
             }
             if col.max_supply != 0 && col.minted >= col.max_supply {
                 return Err(Ignored::RuleViolation("collection is minted out"));
@@ -564,7 +609,7 @@ impl NfdLedger {
             return Err(Ignored::RuleViolation("duplicate collection id for this tx"));
         }
         let creator = Self::sender(ctx)?;
-        self.collections.insert(ctx.txid, Collection { creator, max_supply, meta_ptr, minted: 0, commission: None, forge_fee: None, rarity });
+        self.collections.insert(ctx.txid, Collection { creator, max_supply, meta_ptr, minted: 0, commission: None, forge_fee: None, mint_price: None, rarity });
         self.undo.push(Undo::CollectionCreated { id: ctx.txid });
 
         let mut d = vec![SUB_COLLECTION];
@@ -635,6 +680,47 @@ impl NfdLedger {
         self.undo.push(Undo::ForgeFeeSet { id: cid, previous });
 
         let mut d = vec![SUB_FORGE_FEE];
+        d.extend_from_slice(&cid);
+        d.extend_from_slice(&amount.to_be_bytes());
+        d.extend_from_slice(&payout);
+        Ok(d)
+    }
+
+    /// Set (or lower) the collection's PRIMARY mint price. Signed by the creator.
+    /// The first set (from `None`) may be any amount; after that it is DOWN-ONLY,
+    /// mirroring the resale commission, so the price a buyer faces can only ever
+    /// improve. Enabling a price opens public minting (anyone may pay to mint);
+    /// the creator still mints free regardless.
+    fn apply_mint_price(&mut self, body: &[u8], ctx: &RecordContext) -> Result<Vec<u8>, Ignored> {
+        let mut c = Cursor::new(body);
+        let cid = read32(&mut c)?;
+        let amt = c.read_bytes(8).map_err(|_| Ignored::Malformed("amount"))?;
+        let mut amt8 = [0u8; 8];
+        amt8.copy_from_slice(amt);
+        let amount = u64::from_be_bytes(amt8);
+        let po = c.read_bytes(21).map_err(|_| Ignored::Malformed("payout"))?;
+        let mut payout: Addr21 = [0u8; 21];
+        payout.copy_from_slice(po);
+        if !c.is_empty() {
+            return Err(Ignored::TrailingBytes);
+        }
+        let sender = Self::sender(ctx)?;
+        let col = self.collections.get_mut(&cid).ok_or(Ignored::RuleViolation("unknown collection"))?;
+        // Only the collection's creator may set its mint price.
+        if col.creator != sender {
+            return Err(Ignored::RuleViolation("only the collection creator may set its mint price"));
+        }
+        // DOWN-ONLY: once set, the price can only be lowered, never raised.
+        if let Some((current, _)) = col.mint_price {
+            if amount > current {
+                return Err(Ignored::RuleViolation("primary mint price can only be lowered"));
+            }
+        }
+        let previous = col.mint_price;
+        col.mint_price = Some((amount, payout));
+        self.undo.push(Undo::MintPriceSet { id: cid, previous });
+
+        let mut d = vec![SUB_MINTPRICE];
         d.extend_from_slice(&cid);
         d.extend_from_slice(&amount.to_be_bytes());
         d.extend_from_slice(&payout);
@@ -1012,6 +1098,7 @@ impl RecordHandler for NfdLedger {
             SUB_COLLECTION => self.apply_collection_create(rec.body, ctx),
             SUB_COMMISSION => self.apply_commission_set(rec.body, ctx),
             SUB_FORGE_FEE => self.apply_forge_fee(rec.body, ctx),
+            SUB_MINTPRICE => self.apply_mint_price(rec.body, ctx),
             SUB_LIST => self.apply_list(rec.body, ctx),
             SUB_CANCEL => self.apply_cancel(rec.body, ctx),
             SUB_BUY => self.apply_buy(rec.body, ctx),
@@ -1793,6 +1880,92 @@ mod tests {
         l.apply(&rec(SUB_FORGE, &forge_body([10; 32], [11; 32], cid)), &ctx_pay(30, Some(creator), pay(payout, 100))).unwrap();
         assert!(l.get(&[10; 32]).is_none());
         assert_eq!(l.owner_of(&[30; 32]), Some(pk(7)));
+    }
+
+    // --- Primary mint price (0x0E) -----------------------------------------
+
+    #[test]
+    fn mint_price_opens_public_mint_and_creator_stays_free() {
+        let mut l = NfdLedger::new();
+        let creator = addr(7);
+        let payout = pk(9);
+        // Uncapped collection [5;32], creator addr(7).
+        l.apply(&rec(SUB_COLLECTION, &collection_body(0)), &ctx(5, Some(creator))).unwrap();
+        let cid = [5u8; 32];
+        // No price yet: a non-creator cannot mint.
+        assert!(l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx(10, Some(addr(3)))).is_err());
+        // Creator sets a 1000-duff primary price paid to pk(9).
+        l.apply(&rec(SUB_MINTPRICE, &commission_body(cid, 1000, payout)), &ctx(11, Some(creator))).unwrap();
+        assert_eq!(l.mint_price_of(&cid), Some((1000, payout)));
+        // A public mint that pays nothing is rejected.
+        assert!(l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx(12, Some(addr(3)))).is_err());
+        // Underpaying is rejected.
+        assert!(l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx_pay(13, Some(addr(3)), pay(payout, 999))).is_err());
+        // Paying the price lets a non-creator mint; the pack is theirs.
+        l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx_pay(14, Some(addr(3)), pay(payout, 1000))).unwrap();
+        assert_eq!(l.owner_of(&[14; 32]), Some(pk(3)));
+        assert_eq!(l.collection_of(&cid).unwrap().minted, 1);
+        // The creator still mints FREE (no payment needed).
+        l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx(15, Some(creator))).unwrap();
+        assert_eq!(l.owner_of(&[15; 32]), Some(pk(7)));
+        assert_eq!(l.collection_of(&cid).unwrap().minted, 2);
+    }
+
+    #[test]
+    fn mint_price_is_creator_only_and_down_only() {
+        let mut l = NfdLedger::new();
+        let creator = addr(7);
+        let payout = pk(9);
+        l.apply(&rec(SUB_COLLECTION, &collection_body(0)), &ctx(5, Some(creator))).unwrap();
+        let cid = [5u8; 32];
+        // A non-creator cannot set the price.
+        assert!(l.apply(&rec(SUB_MINTPRICE, &commission_body(cid, 1000, payout)), &ctx(11, Some(addr(3)))).is_err());
+        assert_eq!(l.mint_price_of(&cid), None);
+        // Creator sets 1000, seals the block, then a RAISE to 2000 is rejected.
+        l.apply(&rec(SUB_MINTPRICE, &commission_body(cid, 1000, payout)), &ctx(11, Some(creator))).unwrap();
+        let _ = l.take_block_undo();
+        assert!(l.apply(&rec(SUB_MINTPRICE, &commission_body(cid, 2000, payout)), &ctx(12, Some(creator))).is_err());
+        assert_eq!(l.mint_price_of(&cid), Some((1000, payout)));
+        // A LOWER to 500 is allowed (down-only).
+        l.apply(&rec(SUB_MINTPRICE, &commission_body(cid, 500, payout)), &ctx(13, Some(creator))).unwrap();
+        assert_eq!(l.mint_price_of(&cid), Some((500, payout)));
+    }
+
+    #[test]
+    fn mint_price_rolls_back() {
+        let mut l = NfdLedger::new();
+        let creator = addr(7);
+        let payout = pk(9);
+        l.apply(&rec(SUB_COLLECTION, &collection_body(0)), &ctx(5, Some(creator))).unwrap();
+        let cid = [5u8; 32];
+        let _ = l.take_block_undo(); // seal the collection-create so only the price-set rolls back
+        // Setting from None: a reorg of that block restores None.
+        l.apply(&rec(SUB_MINTPRICE, &commission_body(cid, 1000, payout)), &ctx(11, Some(creator))).unwrap();
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert_eq!(l.mint_price_of(&cid), None);
+        // Set 1000, seal, lower to 500, then reorg only the lower: 1000 is back.
+        l.apply(&rec(SUB_MINTPRICE, &commission_body(cid, 1000, payout)), &ctx(12, Some(creator))).unwrap();
+        let _ = l.take_block_undo();
+        l.apply(&rec(SUB_MINTPRICE, &commission_body(cid, 500, payout)), &ctx(13, Some(creator))).unwrap();
+        let undo = l.take_block_undo();
+        l.rollback_block(undo);
+        assert_eq!(l.mint_price_of(&cid), Some((1000, payout)));
+    }
+
+    #[test]
+    fn public_mint_still_respects_the_cap() {
+        let mut l = NfdLedger::new();
+        let creator = addr(7);
+        let payout = pk(9);
+        // Cap 1.
+        l.apply(&rec(SUB_COLLECTION, &collection_body(1)), &ctx(5, Some(creator))).unwrap();
+        let cid = [5u8; 32];
+        l.apply(&rec(SUB_MINTPRICE, &commission_body(cid, 1000, payout)), &ctx(6, Some(creator))).unwrap();
+        // A paying public mint fills the cap.
+        l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx_pay(7, Some(addr(3)), pay(payout, 1000))).unwrap();
+        // The next paying public mint is rejected: minted out.
+        assert!(l.apply(&rec(SUB_MINT, &mint_into_body(cid)), &ctx_pay(8, Some(addr(4)), pay(payout, 1000))).is_err());
     }
 
     // --- Marketplace (list / cancel / buy) ---------------------------------
